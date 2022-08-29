@@ -185,7 +185,7 @@ const AWS = (function (){
     // (S3 includes bucket name in host but no region)
     return [
       (service == "s3" ? bucket : undefined),
-      service,
+      (service == "ses" ? "email" : service),
       (service == "s3" ? undefined : region),
       "amazonaws.com"
     ].filter(Boolean).join(".");
