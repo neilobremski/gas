@@ -82,8 +82,8 @@ curl -s -L -X POST 'YOUR_DEPLOYMENT_URL' \
 | `contacts.list` | List contacts | `count` |
 | `tasks.list` | List Google Tasks | — (requires Tasks API enabled) |
 | `translate` | Translate text | `text`, `from`, `to` |
-| `fetch` | HTTP proxy | `url`, `method`, `headers`, `payload`, `contentType` |
-| `token.get` | Get OAuth token | — |
+| `fetch` | HTTP proxy (disabled by default) | `url`, `method`, `headers`, `payload`, `contentType` |
+| `token.get` | Get OAuth token (disabled by default) | — |
 
 Every request is a JSON POST with at minimum `{"action": "...", "key": "..."}`.
 
@@ -95,7 +95,7 @@ GAS Bridge uses a **shared secret key** stored in Script Properties (never in so
 
 **Recommendations:**
 
-- **Rotate your key regularly.** Run `Bridge.initKey()` to generate a new one. Update all clients that use the old key.
+- **Rotate your key as needed.** Run `Bridge.initKey()` to generate a new one. Update all clients that use the old key.
 - **Limit scope.** Only run `activateScopes()` for services you actually need. Remove actions from the `HANDLERS` map if you want to disable them.
 - **Keep the deployment URL private.** The URL plus the key is all that's needed to access your Google account's services.
 - **Monitor usage.** Check the Apps Script dashboard (Executions tab) for unexpected activity.
@@ -118,6 +118,6 @@ The bridge is a single Apps Script file that:
 2. **`doPost`** parses the JSON body, validates the key, and routes the `action` to the matching handler function.
 3. Each handler wraps a Google Apps Script API (GmailApp, SpreadsheetApp, DriveApp, etc.) and returns a JSON response.
 
-The `fetch` action is an HTTP proxy — it lets you make outbound HTTP requests from Google's servers, which is useful when you need a clean IP or want to call APIs from environments with network restrictions.
+The `fetch` action is an HTTP proxy — it lets you make outbound HTTP requests from Google's servers, which is useful when you need a clean IP or want to call APIs from environments with network restrictions. **It is disabled by default.** Run `Bridge.enableFetch()` from the Apps Script editor to enable it, or `Bridge.disableFetch()` to disable it again.
 
-The `token.get` action returns a live OAuth access token that inherits the script's authorized scopes. This is useful for calling Google APIs directly (e.g., from a local script) without managing your own OAuth flow.
+The `token.get` action returns a live OAuth access token that inherits the script's authorized scopes. This is useful for calling Google APIs directly (e.g., from a local script) without managing your own OAuth flow. **It is disabled by default.** Run `Bridge.enableTokenGet()` to enable it, or `Bridge.disableTokenGet()` to disable it again.

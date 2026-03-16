@@ -19,8 +19,13 @@
  * Security:
  *   Every POST request must include a valid key. Generate one with Bridge.initKey().
  *   Keys are stored in Script Properties (not in source code). Rotate your key
- *   regularly — this is a shared-secret scheme, not OAuth. Anyone with the key
+ *   as needed — this is a shared-secret scheme, not OAuth. Anyone with the key
  *   and the deployment URL has access to whichever Google services are enabled.
+ *
+ *   The "fetch" and "token.get" actions are disabled by default because they
+ *   expose powerful capabilities (arbitrary HTTP requests and raw OAuth tokens).
+ *   Enable them explicitly by running Bridge.enableFetch() or Bridge.enableTokenGet()
+ *   from the Apps Script editor.
  */
 
 var Bridge = (function() {
@@ -221,9 +226,12 @@ var Bridge = (function() {
     return _json({translated: result, from: req.from || 'auto', to: req.to || 'en'});
   }
 
-  // --- HTTP Proxy ---
+  // --- HTTP Proxy (disabled by default — run Bridge.enableFetch() to enable) ---
 
   function _fetch(req) {
+    if (!_isEnabled('FETCH_ENABLED')) {
+      return _json({error: 'fetch is disabled. Run Bridge.enableFetch() from the Apps Script editor to enable it.'});
+    }
     if (!req.url) return _json({error: 'missing url'});
     var opts = {muteHttpExceptions: true, method: req.method || 'get'};
     if (req.headers) opts.headers = req.headers;
@@ -235,9 +243,12 @@ var Bridge = (function() {
     return _json({status: resp.getResponseCode(), headers: resp.getHeaders(), body: body});
   }
 
-  // --- Token ---
+  // --- Token (disabled by default — run Bridge.enableTokenGet() to enable) ---
 
   function _tokenGet(req) {
+    if (!_isEnabled('TOKEN_GET_ENABLED')) {
+      return _json({error: 'token.get is disabled. Run Bridge.enableTokenGet() from the Apps Script editor to enable it.'});
+    }
     return _json({
       access_token: ScriptApp.getOAuthToken(),
       expires_in: 3600,
@@ -246,6 +257,10 @@ var Bridge = (function() {
   }
 
   // --- Helpers ---
+
+  function _isEnabled(property) {
+    return PropertiesService.getScriptProperties().getProperty(property) === 'true';
+  }
 
   function _json(obj) {
     return ContentService.createTextOutput(JSON.stringify(obj))
@@ -283,13 +298,39 @@ var Bridge = (function() {
     return results;
   }
 
+  // --- Enable/Disable Sensitive Actions (run from the Apps Script editor) ---
+
+  function enableFetch() {
+    PropertiesService.getScriptProperties().setProperty('FETCH_ENABLED', 'true');
+    Logger.log('fetch action ENABLED.');
+  }
+
+  function disableFetch() {
+    PropertiesService.getScriptProperties().deleteProperty('FETCH_ENABLED');
+    Logger.log('fetch action DISABLED.');
+  }
+
+  function enableTokenGet() {
+    PropertiesService.getScriptProperties().setProperty('TOKEN_GET_ENABLED', 'true');
+    Logger.log('token.get action ENABLED.');
+  }
+
+  function disableTokenGet() {
+    PropertiesService.getScriptProperties().deleteProperty('TOKEN_GET_ENABLED');
+    Logger.log('token.get action DISABLED.');
+  }
+
   // Public API
   return {
     doGet: doGet,
     doPost: doPost,
     initKey: initKey,
     getKey: getKey,
-    activateScopes: activateScopes
+    activateScopes: activateScopes,
+    enableFetch: enableFetch,
+    disableFetch: disableFetch,
+    enableTokenGet: enableTokenGet,
+    disableTokenGet: disableTokenGet
   };
 
 })();
