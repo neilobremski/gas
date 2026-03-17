@@ -2,7 +2,7 @@
 
 Turn a Google Apps Script project into a key-authenticated JSON API.
 
-GAS Bridge deploys as a [Web App](https://developers.google.com/apps-script/guides/web) and exposes Google Workspace services — Gmail, Drive, Sheets, Calendar, Docs, Contacts, Translate, and Tasks — through simple HTTP POST requests. Any language or tool that can send JSON over HTTPS can use it.
+GAS Bridge deploys as a [Web App](https://developers.google.com/apps-script/guides/web) and exposes Google Workspace services -- Gmail, Drive, Sheets, Calendar, Docs, Contacts, Translate, and Tasks -- through simple HTTP POST requests. Any language or tool that can send JSON over HTTPS can use it.
 
 ## Quick Start
 
@@ -18,7 +18,7 @@ In the Apps Script editor:
 
 1. Select `Bridge.initKey` from the function dropdown.
 2. Click **Run** (authorize when prompted).
-3. Open **Execution Log** — your key is printed there.
+3. Open **Execution Log** -- your key is printed there.
 
 Store this key securely. It authenticates every request to your bridge.
 
@@ -64,26 +64,47 @@ curl -s -L -X POST 'YOUR_DEPLOYMENT_URL' \
   }'
 ```
 
-> **Note:** Use `-L` with curl — Google Apps Script redirects on first request.
+> **Note:** Use `-L` with curl -- Google Apps Script redirects on first request.
 
-## Available Actions
+## Actions
 
 | Action | Description | Required Fields |
 |--------|-------------|-----------------|
-| `info` | Health check, list actions | — |
-| `gmail.send` | Send email | `to` (+ `subject`, `body`, `cc`, `bcc`, `html`, `replyTo`) |
-| `gmail.check` | Search inbox | `query` (default: `is:unread`), `count` |
-| `sheets.read` | Read spreadsheet | `spreadsheet_id`, `range` |
-| `sheets.append` | Append rows | `spreadsheet_id`, `rows`, `sheet` |
-| `drive.list` | List/search files | `query`, `count` |
-| `drive.create` | Create file | `name`, `type`, `content`, `mime` |
-| `calendar.list` | Upcoming events | `days` (default: 7) |
-| `docs.create` | Create Google Doc | `title`, `body` |
-| `contacts.list` | List contacts | `count` |
-| `tasks.list` | List Google Tasks | — (requires Tasks API enabled) |
-| `translate` | Translate text | `text`, `from`, `to` |
-| `fetch` | HTTP proxy (disabled by default) | `url`, `method`, `headers`, `payload`, `contentType` |
-| `token.get` | Get OAuth token (disabled by default) | — |
+| `calendar.calendars` | List all calendars | -- |
+| `calendar.create` | Create calendar event | `title`, `start`, `end` (+ `calendarId`, `description`, `location`, `guests`) |
+| `calendar.delete` | Delete calendar event | `event_id` (+ `calendarId`) |
+| `calendar.list` | Upcoming events | `days` (default: 7) (+ `calendarId`) |
+| `config.get` | Read Script Properties (disabled by default) | `key` for single value, or omit for all |
+| `config.set` | Write Script Properties (disabled by default) | `config` (object of key-value pairs) |
+| `contacts.list` | List contacts | `count` (default: 20) |
+| `docs.create` | Create Google Doc | `title` (+ `body`) |
+| `drive.create` | Create file | `name` (+ `type`, `content`, `mime`) |
+| `drive.download` | Download file as base64 | `id` |
+| `drive.list` | List/search files | `query`, `count` (default: 10) |
+| `drive.upload` | Upload base64 file | `name`, `data_base64` (+ `mime`, `folder_id`) |
+| `fetch` | HTTP proxy (disabled by default) | `url` (+ `method`, `headers`, `payload`, `contentType`) |
+| `gmail.archive` | Archive and mark read | `thread_id` |
+| `gmail.attachments` | Get/save attachments | `message_id` or `thread_id` (+ `save_to_drive`, `folder_id`) |
+| `gmail.draft.create` | Create email draft | `to` (+ `subject`, `body`, `html`) |
+| `gmail.draft.delete` | Delete a draft | `draft_id` |
+| `gmail.draft.list` | List drafts | `count` (default: 10) |
+| `gmail.draft.send` | Send an existing draft | `draft_id` |
+| `gmail.get` | Get full thread with HTML | `thread_id` |
+| `gmail.label` | Add/remove labels | `thread_id` (+ `add`, `remove`) |
+| `gmail.read` | Mark thread as read | `thread_id` |
+| `gmail.reply` | Reply to thread | `thread_id`, `body` (+ `html`, `cc`, `inlineImages`, `driveImages`) |
+| `gmail.search` | Search email threads | `query` (default: `is:unread`), `count` (default: 10) |
+| `gmail.send` | Send email | `to` (+ `subject`, `body`, `cc`, `bcc`, `html`, `replyTo`, `inlineImages`, `driveImages`, `attachments`) |
+| `info` | Health check, list actions | -- |
+| `sheets.append` | Append rows | `spreadsheet_id`, `rows` (+ `sheet`) |
+| `sheets.create` | Create spreadsheet | `name` (+ `headers`) |
+| `sheets.read` | Read spreadsheet | `spreadsheet_id` (+ `range`) |
+| `sheets.update` | Write values to range | `spreadsheet_id`, `range`, `values` |
+| `tasks.create` | Create a task | `title` (+ `list_id`, `notes`, `due`, `status`) |
+| `tasks.list` | List Google Tasks | -- (requires Tasks API enabled) |
+| `tasks.update` | Update a task | `task_id`, `list_id` (+ `title`, `notes`, `status`, `due`) |
+| `token.get` | Get OAuth token (disabled by default) | -- |
+| `translate` | Translate text | `text` (+ `from`, `to`) |
 
 Every request is a JSON POST with at minimum `{"action": "...", "key": "..."}`.
 
@@ -91,7 +112,7 @@ Every response is JSON with either the result or `{"error": "..."}`.
 
 ## Security
 
-GAS Bridge uses a **shared secret key** stored in Script Properties (never in source code). This is simple and effective for personal use and trusted integrations, but it is not OAuth — anyone with the key and the deployment URL has full access to the enabled services.
+GAS Bridge uses a **shared secret key** stored in Script Properties (never in source code). This is simple and effective for personal use and trusted integrations, but it is not OAuth -- anyone with the key and the deployment URL has full access to the enabled services.
 
 **Recommendations:**
 
@@ -108,7 +129,7 @@ After editing `Code.gs`:
 2. Version: **New Version**
 3. Click **Deploy**
 
-The URL stays the same — clients don't need to change anything.
+The URL stays the same -- clients don't need to change anything.
 
 ## How It Works
 
@@ -118,6 +139,8 @@ The bridge is a single Apps Script file that:
 2. **`doPost`** parses the JSON body, validates the key, and routes the `action` to the matching handler function.
 3. Each handler wraps a Google Apps Script API (GmailApp, SpreadsheetApp, DriveApp, etc.) and returns a JSON response.
 
-The `fetch` action is an HTTP proxy — it lets you make outbound HTTP requests from Google's servers, which is useful when you need a clean IP or want to call APIs from environments with network restrictions. **It is disabled by default.** Run `Bridge.enableFetch()` from the Apps Script editor to enable it, or `Bridge.disableFetch()` to disable it again.
+The `fetch` action is an HTTP proxy -- it lets you make outbound HTTP requests from Google's servers, which is useful when you need a clean IP or want to call APIs from environments with network restrictions. It is disabled by default. Run `Bridge.enableFetch()` from the Apps Script editor to enable it, or `Bridge.disableFetch()` to disable it again.
 
-The `token.get` action returns a live OAuth access token that inherits the script's authorized scopes. This is useful for calling Google APIs directly (e.g., from a local script) without managing your own OAuth flow. **It is disabled by default.** Run `Bridge.enableTokenGet()` to enable it, or `Bridge.disableTokenGet()` to disable it again.
+The `token.get` action returns a live OAuth access token that inherits the script's authorized scopes. This is useful for calling Google APIs directly (e.g., from a local script) without managing your own OAuth flow. It is disabled by default. Run `Bridge.enableTokenGet()` to enable it, or `Bridge.disableTokenGet()` to disable it again.
+
+The `config.get` and `config.set` actions read and write Script Properties -- useful for storing configuration that multiple clients share. They are disabled by default. Run `Bridge.enableConfig()` to enable them, or `Bridge.disableConfig()` to disable them again. The `BRIDGE_KEY` property is always protected -- `config.get` never exposes it and `config.set` silently skips it.
