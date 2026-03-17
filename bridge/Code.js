@@ -1,8 +1,8 @@
 /*
- * GAS Bridge — Turn Google Apps Script Into a Key-Based API
+ * GAS Bridge v2.0 — Turn Google Apps Script Into a Key-Based API
  *
  * Deploys as a Web App and exposes Google Workspace services (Gmail, Drive,
- * Sheets, Calendar, Docs, Contacts, Translate, Tasks) via simple JSON POST
+ * Sheets, Calendar, Docs, Contacts, Translate, and Tasks) via simple JSON POST
  * requests. Authentication uses a shared secret key stored in Script Properties.
  *
  * Setup:
@@ -55,99 +55,171 @@ var Bridge = (function() {
     }
   }
 
-  // --- Action Handlers ---
+  // --- Action Handlers (alphabetized) ---
 
   var HANDLERS = {
-    'info':            _info,
-    'gmail.send':      _gmailSend,
-    'gmail.check':     _gmailCheck,
-    'sheets.read':     _sheetsRead,
-    'sheets.append':   _sheetsAppend,
-    'drive.list':      _driveList,
-    'drive.create':    _driveCreate,
-    'calendar.list':   _calendarList,
-    'docs.create':     _docsCreate,
-    'contacts.list':   _contactsList,
-    'tasks.list':      _tasksList,
-    'translate':       _translate,
-    'fetch':           _fetch,
-    'token.get':       _tokenGet,
+    'calendar.calendars': _calendarCalendars,
+    'calendar.create':    _calendarCreate,
+    'calendar.delete':    _calendarDelete,
+    'calendar.list':      _calendarList,
+    'config.get':         _configGet,
+    'config.set':         _configSet,
+    'contacts.list':      _contactsList,
+    'docs.create':        _docsCreate,
+    'drive.create':       _driveCreate,
+    'drive.download':     _driveDownload,
+    'drive.list':         _driveList,
+    'drive.upload':       _driveUpload,
+    'fetch':              _fetch,
+    'gemini.ask':         _geminiAsk,
+    'gmail.archive':      _gmailArchive,
+    'gmail.check':        _gmailSearch,  // alias for backwards compatibility
+    'gmail.attachments':  _gmailAttachments,
+    'gmail.draft.create': _gmailDraftCreate,
+    'gmail.draft.delete': _gmailDraftDelete,
+    'gmail.draft.get':    _gmailDraftGet,
+    'gmail.draft.list':   _gmailDraftList,
+    'gmail.draft.send':   _gmailDraftSend,
+    'gmail.get':          _gmailGet,
+    'gmail.label':        _gmailLabel,
+    'gmail.read':         _gmailRead,
+    'gmail.reply':        _gmailReply,
+    'gmail.search':       _gmailSearch,
+    'gmail.send':         _gmailSend,
+    'info':               _info,
+    'sheets.append':      _sheetsAppend,
+    'sheets.create':      _sheetsCreate,
+    'sheets.read':        _sheetsRead,
+    'sheets.update':      _sheetsUpdate,
+    'tasks.create':       _tasksCreate,
+    'tasks.list':         _tasksList,
+    'tasks.update':       _tasksUpdate,
+    'token.get':          _tokenGet,
+    'translate':          _translate,
   };
 
-  // --- Info ---
+  // =========================================================================
+  //  Calendar
+  // =========================================================================
 
-  function _info(req) {
-    return _json({
-      service: 'GAS Bridge',
-      version: '1.0',
-      account: Session.getActiveUser().getEmail(),
-      actions: Object.keys(HANDLERS),
-      timestamp: new Date().toISOString()
-    });
-  }
-
-  // --- Gmail ---
-
-  function _gmailSend(req) {
-    if (!req.to) return _json({error: 'missing "to"'});
-    var opts = {};
-    if (req.cc) opts.cc = req.cc;
-    if (req.bcc) opts.bcc = req.bcc;
-    if (req.html) opts.htmlBody = req.body;
-    if (req.replyTo) opts.replyTo = req.replyTo;
-    GmailApp.sendEmail(req.to, req.subject || '(no subject)', req.body || '', opts);
-    return _json({status: 'sent', to: req.to, subject: req.subject});
-  }
-
-  function _gmailCheck(req) {
-    var threads = GmailApp.search(req.query || 'is:unread', 0, req.count || 5);
-    var results = threads.map(function(thread) {
-      var msg = thread.getMessages()[thread.getMessageCount() - 1];
+  function _calendarCalendars(req) {
+    var calendars = CalendarApp.getAllCalendars().map(function(cal) {
       return {
-        id: thread.getId(),
-        subject: msg.getSubject(),
-        from: msg.getFrom(),
-        date: msg.getDate().toISOString(),
-        snippet: msg.getPlainBody().substring(0, 300),
-        unread: thread.isUnread()
+        id: cal.getId(),
+        name: cal.getName(),
+        description: cal.getDescription(),
+        selected: cal.isSelected(),
+        owned: cal.isOwnedByMe()
       };
     });
-    return _json({messages: results, count: results.length});
+    return _json({calendars: calendars, count: calendars.length});
   }
 
-  // --- Sheets ---
-
-  function _sheetsRead(req) {
-    if (!req.spreadsheet_id) return _json({error: 'missing spreadsheet_id'});
-    var data = SpreadsheetApp.openById(req.spreadsheet_id)
-      .getRange(req.range || 'Sheet1!A1:Z100').getValues();
-    while (data.length > 0 && data[data.length - 1].every(function(c) { return c === ''; })) data.pop();
-    return _json({rows: data, count: data.length});
+  function _calendarCreate(req) {
+    if (!req.title) return _json({error: 'missing title'});
+    if (!req.start) return _json({error: 'missing start'});
+    if (!req.end) return _json({error: 'missing end'});
+    var cal = req.calendarId ? CalendarApp.getCalendarById(req.calendarId) : CalendarApp.getDefaultCalendar();
+    var opts = {};
+    if (req.description) opts.description = req.description;
+    if (req.location) opts.location = req.location;
+    if (req.guests) opts.guests = req.guests;
+    var ev = cal.createEvent(req.title, new Date(req.start), new Date(req.end), opts);
+    return _json({status: 'created', id: ev.getId(), title: req.title, start: req.start, end: req.end});
   }
 
-  function _sheetsAppend(req) {
-    if (!req.spreadsheet_id) return _json({error: 'missing spreadsheet_id'});
-    if (!req.rows || !req.rows.length) return _json({error: 'no rows'});
-    var sheet = SpreadsheetApp.openById(req.spreadsheet_id).getSheetByName(req.sheet || 'Sheet1');
-    if (!sheet) return _json({error: 'sheet not found'});
-    req.rows.forEach(function(row) { sheet.appendRow(row); });
-    return _json({status: 'appended', rows_added: req.rows.length});
+  function _calendarDelete(req) {
+    if (!req.event_id) return _json({error: 'missing event_id'});
+    var cal = req.calendarId ? CalendarApp.getCalendarById(req.calendarId) : CalendarApp.getDefaultCalendar();
+    var ev = cal.getEventById(req.event_id);
+    if (!ev) return _json({error: 'event not found'});
+    ev.deleteEvent();
+    return _json({status: 'deleted', event_id: req.event_id});
   }
 
-  // --- Drive ---
+  function _calendarList(req) {
+    var now = new Date(), end = new Date(now.getTime() + (req.days || 7) * 86400000);
+    var cal = req.calendarId ? CalendarApp.getCalendarById(req.calendarId) : CalendarApp.getDefaultCalendar();
+    var events = cal.getEvents(now, end).map(function(ev) {
+      return {
+        id: ev.getId(), title: ev.getTitle(),
+        description: ev.getDescription(),
+        start: ev.getStartTime().toISOString(), end: ev.getEndTime().toISOString(),
+        location: ev.getLocation()
+      };
+    });
+    return _json({events: events, count: events.length});
+  }
 
-  function _driveList(req) {
-    var iter = req.query ? DriveApp.searchFiles(req.query) : DriveApp.getFiles();
-    var files = [], count = req.count || 10;
-    while (iter.hasNext() && files.length < count) {
-      var f = iter.next();
-      files.push({
-        id: f.getId(), name: f.getName(), type: f.getMimeType(),
-        size: f.getSize(), url: f.getUrl(), updated: f.getLastUpdated().toISOString()
-      });
+  // =========================================================================
+  //  Config (disabled by default — run Bridge.enableConfig() to enable)
+  // =========================================================================
+
+  var PROTECTED_KEYS = ['BRIDGE_KEY'];
+
+  function _configGet(req) {
+    if (!_isEnabled('CONFIG_ENABLED')) {
+      return _json({error: 'config.get is disabled. Run Bridge.enableConfig() from the Apps Script editor to enable it.'});
     }
-    return _json({files: files, count: files.length});
+    var props = PropertiesService.getScriptProperties().getProperties();
+    // Never expose protected keys
+    PROTECTED_KEYS.forEach(function(k) { delete props[k]; });
+    if (req.key) {
+      if (PROTECTED_KEYS.indexOf(req.key) !== -1) return _json({error: 'access denied'});
+      var val = PropertiesService.getScriptProperties().getProperty(req.key);
+      return _json({key: req.key, value: val});
+    }
+    return _json({config: props, count: Object.keys(props).length});
   }
+
+  function _configSet(req) {
+    if (!_isEnabled('CONFIG_ENABLED')) {
+      return _json({error: 'config.set is disabled. Run Bridge.enableConfig() from the Apps Script editor to enable it.'});
+    }
+    if (!req.config || typeof req.config !== 'object') return _json({error: 'missing config object'});
+    var props = PropertiesService.getScriptProperties();
+    var set = 0;
+    for (var k in req.config) {
+      if (PROTECTED_KEYS.indexOf(k) !== -1) continue; // silently skip protected keys
+      props.setProperty(k, req.config[k]);
+      set++;
+    }
+    return _json({status: 'ok', properties_set: set});
+  }
+
+  // =========================================================================
+  //  Contacts
+  // =========================================================================
+
+  function _contactsList(req) {
+    var contacts = ContactsApp.getContacts();
+    var count = req.count || 20;
+    var results = contacts.slice(0, count).map(function(c) {
+      var emails = c.getEmails();
+      var phones = c.getPhones();
+      return {
+        name: c.getFullName(),
+        email: emails.length > 0 ? emails[0].getAddress() : null,
+        phone: phones.length > 0 ? phones[0].getPhoneNumber() : null
+      };
+    });
+    return _json({contacts: results, count: results.length});
+  }
+
+  // =========================================================================
+  //  Docs
+  // =========================================================================
+
+  function _docsCreate(req) {
+    if (!req.title) return _json({error: 'missing title'});
+    var doc = DocumentApp.create(req.title);
+    if (req.body) doc.getBody().appendParagraph(req.body);
+    return _json({id: doc.getId(), title: req.title, url: doc.getUrl()});
+  }
+
+  // =========================================================================
+  //  Drive
+  // =========================================================================
 
   function _driveCreate(req) {
     if (!req.name) return _json({error: 'missing name'});
@@ -164,41 +236,377 @@ var Bridge = (function() {
     return _json({id: file.getId(), name: req.name, url: file.getUrl()});
   }
 
-  // --- Calendar ---
+  function _driveDownload(req) {
+    if (!req.id) return _json({error: 'missing id'});
+    var file = DriveApp.getFileById(req.id);
+    var blob = file.getBlob();
+    return _json({
+      id: req.id,
+      name: file.getName(),
+      mimeType: blob.getContentType(),
+      size: file.getSize(),
+      data: Utilities.base64Encode(blob.getBytes())
+    });
+  }
 
-  function _calendarList(req) {
-    var now = new Date(), end = new Date(now.getTime() + (req.days || 7) * 86400000);
-    var events = CalendarApp.getDefaultCalendar().getEvents(now, end).map(function(ev) {
+  function _driveList(req) {
+    var iter = req.query ? DriveApp.searchFiles(req.query) : DriveApp.getFiles();
+    var files = [], count = req.count || 10;
+    while (iter.hasNext() && files.length < count) {
+      var f = iter.next();
+      files.push({
+        id: f.getId(), name: f.getName(), type: f.getMimeType(),
+        size: f.getSize(), url: f.getUrl(), updated: f.getLastUpdated().toISOString()
+      });
+    }
+    return _json({files: files, count: files.length});
+  }
+
+  function _driveUpload(req) {
+    if (!req.name) return _json({error: 'missing name'});
+    if (!req.data_base64) return _json({error: 'missing data_base64'});
+    var blob = Utilities.newBlob(Utilities.base64Decode(req.data_base64), req.mime || 'application/octet-stream', req.name);
+    var folder = req.folder_id ? DriveApp.getFolderById(req.folder_id) : DriveApp.getRootFolder();
+    var file = folder.createFile(blob);
+    return _json({id: file.getId(), name: file.getName(), url: file.getUrl(), size: file.getSize()});
+  }
+
+  // =========================================================================
+  //  Gmail
+  // =========================================================================
+
+  // =========================================================================
+  //  Gemini (uses API key from Script Properties, or falls back to OAuth)
+  // =========================================================================
+
+  function _geminiAsk(req) {
+    if (!req.prompt) return _json({error: 'missing prompt'});
+    var model = req.model || 'gemini-2.0-flash';
+    var apiKey = PropertiesService.getScriptProperties().getProperty('GEMINI_API_KEY');
+    var url = 'https://generativelanguage.googleapis.com/v1beta/models/' + model + ':generateContent';
+    var headers = {};
+    if (apiKey) {
+      url += '?key=' + apiKey;
+    } else {
+      headers['Authorization'] = 'Bearer ' + ScriptApp.getOAuthToken();
+    }
+    var body = {contents: [{parts: [{text: req.prompt}]}]};
+    if (req.system) {
+      body.systemInstruction = {parts: [{text: req.system}]};
+    }
+    body.generationConfig = {maxOutputTokens: req.maxTokens || 2048, temperature: req.temperature || 0.7};
+    var resp = UrlFetchApp.fetch(url, {
+      method: 'post', contentType: 'application/json',
+      headers: headers, payload: JSON.stringify(body), muteHttpExceptions: true
+    });
+    var data = JSON.parse(resp.getContentText());
+    var text = '';
+    try { text = data.candidates[0].content.parts[0].text; } catch (e) {}
+    return _json({text: text, model: model, usage: data.usageMetadata || {}});
+  }
+
+  // =========================================================================
+  //  Gmail
+  // =========================================================================
+
+  function _gmailArchive(req) {
+    if (!req.thread_id) return _json({error: 'missing thread_id'});
+    var thread = GmailApp.getThreadById(req.thread_id);
+    thread.markRead();
+    thread.moveToArchive();
+    return _json({status: 'archived', thread_id: req.thread_id});
+  }
+
+  function _gmailAttachments(req) {
+    if (!req.message_id && !req.thread_id) return _json({error: 'missing message_id or thread_id'});
+    var messages = [];
+    if (req.message_id) {
+      messages.push(GmailApp.getMessageById(req.message_id));
+    } else {
+      messages = GmailApp.getThreadById(req.thread_id).getMessages();
+    }
+    var attachments = [];
+    messages.forEach(function(msg) {
+      var msgId = msg.getId();
+      msg.getAttachments().forEach(function(a) {
+        var item = {
+          filename: a.getName(),
+          mimeType: a.getContentType(),
+          size: a.getSize(),
+          message_id: msgId
+        };
+        if (a.getSize() <= 1048576) {
+          item.data = Utilities.base64Encode(a.getBytes());
+        }
+        if (req.save_to_drive) {
+          var folder = req.folder_id ? DriveApp.getFolderById(req.folder_id) : DriveApp.getRootFolder();
+          var saved = folder.createFile(a);
+          item.drive_id = saved.getId();
+          item.drive_url = saved.getUrl();
+        }
+        attachments.push(item);
+      });
+    });
+    return _json({attachments: attachments, count: attachments.length});
+  }
+
+  function _gmailDraftCreate(req) {
+    if (!req.to) return _json({error: 'missing "to"'});
+    var draft = GmailApp.createDraft(req.to, req.subject || '(no subject)', req.body || '',
+      req.html ? {htmlBody: req.body} : {});
+    var msg = draft.getMessage();
+    return _json({id: draft.getId(), message_id: msg.getId(), to: req.to, subject: req.subject});
+  }
+
+  function _gmailDraftDelete(req) {
+    if (!req.draft_id) return _json({error: 'missing draft_id'});
+    var drafts = GmailApp.getDrafts();
+    for (var i = 0; i < drafts.length; i++) {
+      if (drafts[i].getId() === req.draft_id) {
+        drafts[i].deleteDraft();
+        return _json({status: 'deleted', draft_id: req.draft_id});
+      }
+    }
+    return _json({error: 'draft not found', draft_id: req.draft_id});
+  }
+
+  function _gmailDraftGet(req) {
+    if (!req.draft_id) return _json({error: 'missing draft_id'});
+    var drafts = GmailApp.getDrafts();
+    for (var i = 0; i < drafts.length; i++) {
+      if (drafts[i].getId() === req.draft_id) {
+        var msg = drafts[i].getMessage();
+        return _json({
+          id: drafts[i].getId(),
+          message_id: msg.getId(),
+          subject: msg.getSubject(),
+          to: msg.getTo(),
+          body: msg.getPlainBody(),
+          html: msg.getBody(),
+          date: msg.getDate().toISOString()
+        });
+      }
+    }
+    return _json({error: 'draft not found', draft_id: req.draft_id});
+  }
+
+  function _gmailDraftList(req) {
+    var drafts = GmailApp.getDrafts();
+    var count = req.count || 10;
+    var results = drafts.slice(0, count).map(function(d) {
+      var msg = d.getMessage();
       return {
-        title: ev.getTitle(), start: ev.getStartTime().toISOString(),
-        end: ev.getEndTime().toISOString(), location: ev.getLocation()
+        id: d.getId(),
+        message_id: msg.getId(),
+        subject: msg.getSubject(),
+        to: msg.getTo(),
+        date: msg.getDate().toISOString()
       };
     });
-    return _json({events: events, count: events.length});
+    return _json({drafts: results, count: results.length});
   }
 
-  // --- Docs ---
-
-  function _docsCreate(req) {
-    if (!req.title) return _json({error: 'missing title'});
-    var doc = DocumentApp.create(req.title);
-    if (req.body) doc.getBody().appendParagraph(req.body);
-    return _json({id: doc.getId(), title: req.title, url: doc.getUrl()});
+  function _gmailDraftSend(req) {
+    if (!req.draft_id) return _json({error: 'missing draft_id'});
+    var drafts = GmailApp.getDrafts();
+    for (var i = 0; i < drafts.length; i++) {
+      if (drafts[i].getId() === req.draft_id) {
+        var msg = drafts[i].send();
+        return _json({status: 'sent', message_id: msg.getId(), subject: msg.getSubject()});
+      }
+    }
+    return _json({error: 'draft not found', draft_id: req.draft_id});
   }
 
-  // --- Contacts ---
-
-  function _contactsList(req) {
-    var contacts = ContactsApp.getContacts();
-    var count = req.count || 20;
-    var results = contacts.slice(0, count).map(function(c) {
-      var emails = c.getEmails();
-      return {name: c.getFullName(), email: emails.length > 0 ? emails[0].getAddress() : null};
+  function _gmailGet(req) {
+    if (!req.thread_id) return _json({error: 'missing thread_id'});
+    var thread = GmailApp.getThreadById(req.thread_id);
+    var messages = thread.getMessages().map(function(m) {
+      return {
+        id: m.getId(),
+        subject: m.getSubject(),
+        from: m.getFrom(),
+        to: m.getTo(),
+        cc: m.getCc(),
+        date: m.getDate().toISOString(),
+        plain: m.getPlainBody().substring(0, 300),
+        html: m.getBody(),
+        attachments: m.getAttachments().map(function(a) {
+          return {name: a.getName(), type: a.getContentType(), size: a.getSize()};
+        }),
+        starred: m.isStarred()
+      };
     });
-    return _json({contacts: results, count: results.length});
+    return _json({thread_id: req.thread_id, messages: messages, count: messages.length});
   }
 
-  // --- Google Tasks ---
+  function _gmailLabel(req) {
+    if (!req.thread_id) return _json({error: 'missing thread_id'});
+    var thread = GmailApp.getThreadById(req.thread_id);
+    if (req.add) {
+      var addLabel = GmailApp.getUserLabelByName(req.add) || GmailApp.createLabel(req.add);
+      thread.addLabel(addLabel);
+    }
+    if (req.remove) {
+      var removeLabel = GmailApp.getUserLabelByName(req.remove);
+      if (removeLabel) thread.removeLabel(removeLabel);
+    }
+    return _json({status: 'labeled', thread_id: req.thread_id});
+  }
+
+  function _gmailRead(req) {
+    if (!req.thread_id) return _json({error: 'missing thread_id'});
+    var thread = GmailApp.getThreadById(req.thread_id);
+    thread.markRead();
+    return _json({status: 'marked_read', thread_id: req.thread_id});
+  }
+
+  function _gmailReply(req) {
+    if (!req.thread_id) return _json({error: 'missing thread_id'});
+    if (!req.body) return _json({error: 'missing body'});
+    var thread = GmailApp.getThreadById(req.thread_id);
+    var msgs = thread.getMessages();
+    var me = Session.getActiveUser().getEmail().toLowerCase();
+    var msg = msgs[msgs.length - 1];
+    for (var i = msgs.length - 1; i >= 0; i--) {
+      if (msgs[i].getFrom().toLowerCase().indexOf(me) === -1) {
+        msg = msgs[i];
+        break;
+      }
+    }
+    var opts = {};
+    if (req.html) opts.htmlBody = _escapeAstral(req.body);
+    if (req.cc) opts.cc = req.cc;
+    if (req.inlineImages) {
+      var imgs = {};
+      for (var k in req.inlineImages) {
+        var img = req.inlineImages[k];
+        imgs[k] = Utilities.newBlob(Utilities.base64Decode(img.data), img.mimeType || 'image/png', k);
+      }
+      opts.inlineImages = imgs;
+    }
+    _attachDriveImages(req, opts);
+    msg.reply(req.body, opts);
+    return _json({status: 'replied', thread_id: req.thread_id, subject: msg.getSubject()});
+  }
+
+  function _gmailSearch(req) {
+    var threads = GmailApp.search(req.query || 'is:unread', 0, req.count || 10);
+    var results = threads.map(function(thread) {
+      var msg = thread.getMessages()[thread.getMessageCount() - 1];
+      return {
+        id: thread.getId(),
+        subject: msg.getSubject(),
+        from: msg.getFrom(),
+        date: msg.getDate().toISOString(),
+        snippet: msg.getPlainBody().substring(0, 300),
+        unread: thread.isUnread()
+      };
+    });
+    return _json({messages: results, count: results.length});
+  }
+
+  function _gmailSend(req) {
+    if (!req.to) return _json({error: 'missing "to"'});
+    var opts = {};
+    if (req.cc) opts.cc = req.cc;
+    if (req.bcc) opts.bcc = req.bcc;
+    if (req.html) opts.htmlBody = _escapeAstral(req.body);
+    if (req.replyTo) opts.replyTo = req.replyTo;
+    // Client-side inline images (base64 from caller)
+    if (req.inlineImages) {
+      var imgs = {};
+      for (var k in req.inlineImages) {
+        var img = req.inlineImages[k];
+        imgs[k] = Utilities.newBlob(Utilities.base64Decode(img.data), img.mimeType || 'image/png', k);
+      }
+      opts.inlineImages = imgs;
+    }
+    // Server-side Drive images (zero transfer cost — pulled from Drive by GAS)
+    // Small files (<0.5MB): inlined as CID. Large files: set public and embedded as URL.
+    // In HTML body, use {{img0}}, {{img1}} as placeholders; if absent, images are appended.
+    _attachDriveImages(req, opts);
+    if (req.attachments) {
+      opts.attachments = req.attachments.map(function(a) {
+        return Utilities.newBlob(Utilities.base64Decode(a.data), a.mimeType || 'application/octet-stream', a.name);
+      });
+    }
+    GmailApp.sendEmail(req.to, req.subject || '(no subject)', req.body || '', opts);
+    return _json({status: 'sent', to: req.to, subject: req.subject});
+  }
+
+  // =========================================================================
+  //  Info
+  // =========================================================================
+
+  function _info(req) {
+    return _json({
+      service: 'GAS Bridge',
+      version: '2.0',
+      account: Session.getActiveUser().getEmail(),
+      actions: Object.keys(HANDLERS),
+      timestamp: new Date().toISOString()
+    });
+  }
+
+  // =========================================================================
+  //  Sheets
+  // =========================================================================
+
+  function _sheetsAppend(req) {
+    if (!req.spreadsheet_id) return _json({error: 'missing spreadsheet_id'});
+    if (!req.rows || !req.rows.length) return _json({error: 'no rows'});
+    var sheet = SpreadsheetApp.openById(req.spreadsheet_id).getSheetByName(req.sheet || 'Sheet1');
+    if (!sheet) return _json({error: 'sheet not found'});
+    req.rows.forEach(function(row) { sheet.appendRow(row); });
+    return _json({status: 'appended', rows_added: req.rows.length});
+  }
+
+  function _sheetsCreate(req) {
+    if (!req.name) return _json({error: 'missing name'});
+    var ss = SpreadsheetApp.create(req.name);
+    if (req.headers) ss.getActiveSheet().appendRow(req.headers);
+    return _json({id: ss.getId(), name: req.name, url: ss.getUrl()});
+  }
+
+  function _sheetsRead(req) {
+    if (!req.spreadsheet_id) return _json({error: 'missing spreadsheet_id'});
+    var data = SpreadsheetApp.openById(req.spreadsheet_id)
+      .getRange(req.range || 'Sheet1!A1:Z100').getValues();
+    while (data.length > 0 && data[data.length - 1].every(function(c) { return c === ''; })) data.pop();
+    return _json({rows: data, count: data.length});
+  }
+
+  function _sheetsUpdate(req) {
+    if (!req.spreadsheet_id) return _json({error: 'missing spreadsheet_id'});
+    if (!req.range) return _json({error: 'missing range'});
+    if (!req.values) return _json({error: 'missing values (2D array)'});
+    SpreadsheetApp.openById(req.spreadsheet_id).getRange(req.range).setValues(req.values);
+    return _json({status: 'updated', range: req.range});
+  }
+
+  // =========================================================================
+  //  Tasks
+  // =========================================================================
+
+  function _tasksCreate(req) {
+    try {
+      if (!req.title) return _json({error: 'missing title'});
+      var listId = req.list_id;
+      if (!listId) {
+        var lists = Tasks.Tasklists.list();
+        listId = lists.items[0].id;
+      }
+      var resource = {title: req.title};
+      if (req.notes) resource.notes = req.notes;
+      if (req.due) resource.due = req.due;
+      if (req.status) resource.status = req.status;
+      var t = Tasks.Tasks.insert(resource, listId);
+      return _json({id: t.id, title: t.title, status: t.status, listId: listId});
+    } catch (e) {
+      return _json({error: 'Tasks API not enabled. Add via Services > Tasks API.', detail: e.message});
+    }
+  }
 
   function _tasksList(req) {
     try {
@@ -207,8 +615,9 @@ var Bridge = (function() {
         var tasks = Tasks.Tasks.list(list.id);
         return {
           list: list.title,
+          list_id: list.id,
           tasks: (tasks.items || []).map(function(t) {
-            return {title: t.title, status: t.status, due: t.due || null};
+            return {id: t.id, title: t.title, status: t.status, due: t.due || null, notes: t.notes || null};
           })
         };
       });
@@ -218,7 +627,25 @@ var Bridge = (function() {
     }
   }
 
-  // --- Translate ---
+  function _tasksUpdate(req) {
+    try {
+      if (!req.task_id) return _json({error: 'missing task_id'});
+      if (!req.list_id) return _json({error: 'missing list_id'});
+      var resource = {};
+      if (req.title) resource.title = req.title;
+      if (req.notes) resource.notes = req.notes;
+      if (req.status) resource.status = req.status;
+      if (req.due) resource.due = req.due;
+      var t = Tasks.Tasks.patch(resource, req.list_id, req.task_id);
+      return _json({id: t.id, title: t.title, status: t.status});
+    } catch (e) {
+      return _json({error: 'Tasks API not enabled. Add via Services > Tasks API.', detail: e.message});
+    }
+  }
+
+  // =========================================================================
+  //  Translate
+  // =========================================================================
 
   function _translate(req) {
     if (!req.text) return _json({error: 'missing text'});
@@ -226,7 +653,9 @@ var Bridge = (function() {
     return _json({translated: result, from: req.from || 'auto', to: req.to || 'en'});
   }
 
-  // --- HTTP Proxy (disabled by default — run Bridge.enableFetch() to enable) ---
+  // =========================================================================
+  //  Fetch (disabled by default — run Bridge.enableFetch() to enable)
+  // =========================================================================
 
   function _fetch(req) {
     if (!_isEnabled('FETCH_ENABLED')) {
@@ -243,7 +672,9 @@ var Bridge = (function() {
     return _json({status: resp.getResponseCode(), headers: resp.getHeaders(), body: body});
   }
 
-  // --- Token (disabled by default — run Bridge.enableTokenGet() to enable) ---
+  // =========================================================================
+  //  Token (disabled by default — run Bridge.enableTokenGet() to enable)
+  // =========================================================================
 
   function _tokenGet(req) {
     if (!_isEnabled('TOKEN_GET_ENABLED')) {
@@ -256,18 +687,73 @@ var Bridge = (function() {
     });
   }
 
-  // --- Helpers ---
+  // =========================================================================
+  //  Helpers
+  // =========================================================================
+
+  // Pull images from Google Drive and attach inline. Zero transfer cost from the client.
+  // driveImages: array of Drive file IDs. Small files (<0.5MB) become CID inline attachments.
+  // Large files are set to public and embedded as <img src="URL">.
+  // In HTML body, use {{img0}}, {{img1}} etc. as placeholders. If absent, images are appended.
+  function _attachDriveImages(req, opts) {
+    if (!req.driveImages || !req.driveImages.length) return;
+    var inlineImgs = opts.inlineImages || {};
+    var htmlBody = opts.htmlBody || req.body || '';
+    for (var i = 0; i < req.driveImages.length; i++) {
+      var fileId = req.driveImages[i];
+      var key = 'img' + i;
+      try {
+        var file = DriveApp.getFileById(fileId);
+        var blob = file.getBlob();
+        if (blob.getBytes().length < 524288) { // < 0.5 MB
+          inlineImgs[key] = blob;
+          if (htmlBody.indexOf('{{' + key + '}}') !== -1) {
+            htmlBody = htmlBody.replace('{{' + key + '}}', '<img src="cid:' + key + '">');
+          } else {
+            htmlBody += '<br><img src="cid:' + key + '" style="max-width:500px;">';
+          }
+        } else {
+          file.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
+          var url = 'https://drive.google.com/uc?export=view&id=' + fileId;
+          if (htmlBody.indexOf('{{' + key + '}}') !== -1) {
+            htmlBody = htmlBody.replace('{{' + key + '}}', '<img src="' + url + '">');
+          } else {
+            htmlBody += '<br><img src="' + url + '" style="max-width:500px;">';
+          }
+        }
+      } catch (e) {
+        Logger.log('driveImages error for ' + fileId + ': ' + e);
+      }
+    }
+    opts.htmlBody = htmlBody;
+    if (Object.keys(inlineImgs).length) opts.inlineImages = inlineImgs;
+  }
+
+  // Convert 4-byte emoji (astral plane, U+10000+) to HTML numeric entities.
+  // GAS's JS runtime uses UCS-2 and mangles surrogate pairs. Email clients
+  // render &#x1F419; as the octopus emoji correctly.
+  function _escapeAstral(str) {
+    if (!str) return str;
+    return str.replace(/[\uD800-\uDBFF][\uDC00-\uDFFF]/g, function(pair) {
+      var code = (pair.charCodeAt(0) - 0xD800) * 0x400 + (pair.charCodeAt(1) - 0xDC00) + 0x10000;
+      return '&#x' + code.toString(16).toUpperCase() + ';';
+    });
+  }
 
   function _isEnabled(property) {
     return PropertiesService.getScriptProperties().getProperty(property) === 'true';
   }
 
   function _json(obj) {
+    // ContentService defaults to UTF-8. Do NOT call setCharset() — it has caused
+    // bridge-down crashes in production (see commit 7b9ca9e). The default is correct.
     return ContentService.createTextOutput(JSON.stringify(obj))
       .setMimeType(ContentService.MimeType.JSON);
   }
 
-  // --- Setup Functions (run from the Apps Script editor) ---
+  // =========================================================================
+  //  Setup Functions (run from the Apps Script editor)
+  // =========================================================================
 
   function initKey() {
     var key = Utilities.getUuid();
@@ -320,6 +806,16 @@ var Bridge = (function() {
     Logger.log('token.get action DISABLED.');
   }
 
+  function enableConfig() {
+    PropertiesService.getScriptProperties().setProperty('CONFIG_ENABLED', 'true');
+    Logger.log('config.get and config.set actions ENABLED. BRIDGE_KEY is always protected.');
+  }
+
+  function disableConfig() {
+    PropertiesService.getScriptProperties().deleteProperty('CONFIG_ENABLED');
+    Logger.log('config.get and config.set actions DISABLED.');
+  }
+
   // Public API
   return {
     doGet: doGet,
@@ -330,7 +826,9 @@ var Bridge = (function() {
     enableFetch: enableFetch,
     disableFetch: disableFetch,
     enableTokenGet: enableTokenGet,
-    disableTokenGet: disableTokenGet
+    disableTokenGet: disableTokenGet,
+    enableConfig: enableConfig,
+    disableConfig: disableConfig
   };
 
 })();
