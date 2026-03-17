@@ -72,6 +72,22 @@ var Bridge = (function() {
     'translate':       _translate,
     'fetch':           _fetch,
     'token.get':       _tokenGet,
+    'gmail.get':           _gmailGet,
+    'gmail.read':          _gmailRead,
+    'gmail.archive':       _gmailArchive,
+    'gmail.reply':         _gmailReply,
+    'gmail.label':         _gmailLabel,
+    'gmail.attachments':   _gmailAttachments,
+    'sheets.create':       _sheetsCreate,
+    'sheets.update':       _sheetsUpdate,
+    'drive.upload':        _driveUpload,
+    'drive.download':      _driveDownload,
+    'calendar.get':        _calendarGet,
+    'calendar.create':     _calendarCreate,
+    'calendar.delete':     _calendarDelete,
+    'calendar.calendars':  _calendarCalendars,
+    'tasks.create':        _tasksCreate,
+    'tasks.update':        _tasksUpdate,
   };
 
   // --- Info ---
@@ -95,6 +111,19 @@ var Bridge = (function() {
     if (req.bcc) opts.bcc = req.bcc;
     if (req.html) opts.htmlBody = req.body;
     if (req.replyTo) opts.replyTo = req.replyTo;
+    if (req.inlineImages) {
+      var imgs = {};
+      for (var k in req.inlineImages) {
+        var img = req.inlineImages[k];
+        imgs[k] = Utilities.newBlob(Utilities.base64Decode(img.data), img.mimeType, k);
+      }
+      opts.inlineImages = imgs;
+    }
+    if (req.attachments) {
+      opts.attachments = req.attachments.map(function(a) {
+        return Utilities.newBlob(Utilities.base64Decode(a.data), a.mimeType, a.name);
+      });
+    }
     GmailApp.sendEmail(req.to, req.subject || '(no subject)', req.body || '', opts);
     return _json({status: 'sent', to: req.to, subject: req.subject});
   }
@@ -168,7 +197,8 @@ var Bridge = (function() {
 
   function _calendarList(req) {
     var now = new Date(), end = new Date(now.getTime() + (req.days || 7) * 86400000);
-    var events = CalendarApp.getDefaultCalendar().getEvents(now, end).map(function(ev) {
+    var cal = req.calendarId ? CalendarApp.getCalendarById(req.calendarId) : CalendarApp.getDefaultCalendar();
+    var events = cal.getEvents(now, end).map(function(ev) {
       return {
         title: ev.getTitle(), start: ev.getStartTime().toISOString(),
         end: ev.getEndTime().toISOString(), location: ev.getLocation()
@@ -254,6 +284,229 @@ var Bridge = (function() {
       expires_in: 3600,
       note: 'Scopes depend on which services have been activated via activateScopes().'
     });
+  }
+
+  // --- Gmail (extended) ---
+
+  function _gmailGet(req) {
+    if (!req.thread_id) return _json({error: 'missing thread_id'});
+    var thread = GmailApp.getThreadById(req.thread_id);
+    if (!thread) return _json({error: 'thread not found'});
+    var msgs = thread.getMessages().map(function(m) {
+      return {
+        id: m.getId(), subject: m.getSubject(), from: m.getFrom(),
+        to: m.getTo(), cc: m.getCc(), date: m.getDate().toISOString(),
+        plain: m.getPlainBody().substring(0, 300), html: m.getBody(),
+        attachments: m.getAttachments().map(function(a) {
+          return {name: a.getName(), type: a.getContentType(), size: a.getSize()};
+        }),
+        starred: m.isStarred()
+      };
+    });
+    return _json({thread_id: req.thread_id, messages: msgs, count: msgs.length});
+  }
+
+  function _gmailRead(req) {
+    if (!req.thread_id) return _json({error: 'missing thread_id'});
+    GmailApp.getThreadById(req.thread_id).markRead();
+    return _json({status: 'marked_read', thread_id: req.thread_id});
+  }
+
+  function _gmailArchive(req) {
+    if (!req.thread_id) return _json({error: 'missing thread_id'});
+    var thread = GmailApp.getThreadById(req.thread_id);
+    thread.markRead();
+    thread.moveToArchive();
+    return _json({status: 'archived', thread_id: req.thread_id});
+  }
+
+  function _gmailReply(req) {
+    if (!req.thread_id) return _json({error: 'missing thread_id'});
+    if (!req.body) return _json({error: 'missing body'});
+    var me = Session.getActiveUser().getEmail();
+    var msgs = GmailApp.getThreadById(req.thread_id).getMessages();
+    var msg = msgs[msgs.length - 1];
+    for (var i = msgs.length - 1; i >= 0; i--) {
+      if (msgs[i].getFrom().indexOf(me) === -1) { msg = msgs[i]; break; }
+    }
+    var opts = {};
+    if (req.html) opts.htmlBody = req.body;
+    if (req.cc) opts.cc = req.cc;
+    if (req.inlineImages) {
+      var imgs = {};
+      for (var k in req.inlineImages) {
+        var img = req.inlineImages[k];
+        imgs[k] = Utilities.newBlob(Utilities.base64Decode(img.data), img.mimeType, k);
+      }
+      opts.inlineImages = imgs;
+    }
+    msg.reply(req.body, opts);
+    return _json({status: 'replied', thread_id: req.thread_id, replied_to: msg.getId()});
+  }
+
+  function _gmailLabel(req) {
+    if (!req.thread_id) return _json({error: 'missing thread_id'});
+    var thread = GmailApp.getThreadById(req.thread_id);
+    if (req.add) {
+      var label = GmailApp.getUserLabelByName(req.add) || GmailApp.createLabel(req.add);
+      thread.addLabel(label);
+    }
+    if (req.remove) {
+      var rlabel = GmailApp.getUserLabelByName(req.remove);
+      if (rlabel) thread.removeLabel(rlabel);
+    }
+    return _json({status: 'labeled', thread_id: req.thread_id, add: req.add || null, remove: req.remove || null});
+  }
+
+  function _gmailAttachments(req) {
+    var msgs;
+    if (req.message_id) {
+      msgs = [GmailApp.getMessageById(req.message_id)];
+    } else if (req.thread_id) {
+      msgs = GmailApp.getThreadById(req.thread_id).getMessages();
+    } else {
+      return _json({error: 'missing message_id or thread_id'});
+    }
+    var results = [];
+    msgs.forEach(function(m) {
+      m.getAttachments().forEach(function(a) {
+        var item = {filename: a.getName(), mimeType: a.getContentType(), size: a.getSize(), message_id: m.getId()};
+        if (a.getSize() <= 1048576) {
+          item.data = Utilities.base64Encode(a.getBytes());
+        } else {
+          item.truncated = true;
+        }
+        if (req.save_to_drive) {
+          var file = DriveApp.createFile(a);
+          item.drive_id = file.getId();
+          item.drive_url = file.getUrl();
+        }
+        results.push(item);
+      });
+    });
+    return _json({attachments: results, count: results.length});
+  }
+
+  // --- Sheets (extended) ---
+
+  function _sheetsCreate(req) {
+    if (!req.name) return _json({error: 'missing name'});
+    var ss = SpreadsheetApp.create(req.name);
+    if (req.headers) ss.getActiveSheet().appendRow(req.headers);
+    return _json({id: ss.getId(), name: req.name, url: ss.getUrl()});
+  }
+
+  function _sheetsUpdate(req) {
+    if (!req.spreadsheet_id) return _json({error: 'missing spreadsheet_id'});
+    if (!req.range) return _json({error: 'missing range'});
+    if (!req.values) return _json({error: 'missing values'});
+    SpreadsheetApp.openById(req.spreadsheet_id).getRange(req.range).setValues(req.values);
+    return _json({status: 'updated', range: req.range});
+  }
+
+  // --- Drive (extended) ---
+
+  function _driveUpload(req) {
+    if (!req.name) return _json({error: 'missing name'});
+    if (!req.data_base64) return _json({error: 'missing data_base64'});
+    var blob = Utilities.newBlob(Utilities.base64Decode(req.data_base64), req.mime || 'application/octet-stream', req.name);
+    var file;
+    if (req.folder_id) {
+      file = DriveApp.getFolderById(req.folder_id).createFile(blob);
+    } else {
+      file = DriveApp.createFile(blob);
+    }
+    return _json({id: file.getId(), name: file.getName(), url: file.getUrl(), size: file.getSize()});
+  }
+
+  function _driveDownload(req) {
+    if (!req.id) return _json({error: 'missing id'});
+    var file = DriveApp.getFileById(req.id);
+    var blob = file.getBlob();
+    return _json({
+      id: file.getId(), name: file.getName(), mimeType: blob.getContentType(),
+      size: file.getSize(), data: Utilities.base64Encode(blob.getBytes())
+    });
+  }
+
+  // --- Calendar (extended) ---
+
+  function _calendarGet(req) {
+    if (!req.event_id) return _json({error: 'missing event_id'});
+    var cal = req.calendarId ? CalendarApp.getCalendarById(req.calendarId) : CalendarApp.getDefaultCalendar();
+    var ev = cal.getEventById(req.event_id);
+    if (!ev) return _json({error: 'event not found'});
+    return _json({
+      id: ev.getId(), title: ev.getTitle(),
+      start: ev.getStartTime().toISOString(), end: ev.getEndTime().toISOString(),
+      description: ev.getDescription(), location: ev.getLocation(),
+      attendees: ev.getGuestList().map(function(g) { return g.getEmail(); }),
+      allDay: ev.isAllDayEvent()
+    });
+  }
+
+  function _calendarCreate(req) {
+    if (!req.title) return _json({error: 'missing title'});
+    if (!req.start || !req.end) return _json({error: 'missing start or end'});
+    var cal = req.calendarId ? CalendarApp.getCalendarById(req.calendarId) : CalendarApp.getDefaultCalendar();
+    var opts = {};
+    if (req.description) opts.description = req.description;
+    if (req.location) opts.location = req.location;
+    if (req.guests) opts.guests = req.guests;
+    var ev = cal.createEvent(req.title, new Date(req.start), new Date(req.end), opts);
+    return _json({status: 'created', id: ev.getId(), title: req.title, start: req.start, end: req.end});
+  }
+
+  function _calendarDelete(req) {
+    if (!req.event_id) return _json({error: 'missing event_id'});
+    var cal = req.calendarId ? CalendarApp.getCalendarById(req.calendarId) : CalendarApp.getDefaultCalendar();
+    var ev = cal.getEventById(req.event_id);
+    if (!ev) return _json({error: 'event not found'});
+    ev.deleteEvent();
+    return _json({status: 'deleted', event_id: req.event_id});
+  }
+
+  function _calendarCalendars(req) {
+    var cals = CalendarApp.getAllCalendars().map(function(c) {
+      return {
+        id: c.getId(), name: c.getName(), description: c.getDescription(),
+        selected: c.isSelected(), owned: c.isOwnedByMe()
+      };
+    });
+    return _json({calendars: cals, count: cals.length});
+  }
+
+  // --- Tasks (extended) ---
+
+  function _tasksCreate(req) {
+    if (!req.title) return _json({error: 'missing title'});
+    try {
+      var listId = req.list_id || Tasks.Tasklists.list().items[0].id;
+      var resource = {title: req.title};
+      if (req.notes) resource.notes = req.notes;
+      if (req.due) resource.due = req.due;
+      if (req.status) resource.status = req.status;
+      var task = Tasks.Tasks.insert(resource, listId);
+      return _json({id: task.id, title: task.title, status: task.status, listId: listId});
+    } catch (e) {
+      return _json({error: 'Tasks API error', detail: e.message});
+    }
+  }
+
+  function _tasksUpdate(req) {
+    if (!req.task_id) return _json({error: 'missing task_id'});
+    try {
+      var listId = req.list_id || Tasks.Tasklists.list().items[0].id;
+      var resource = {};
+      if (req.title) resource.title = req.title;
+      if (req.notes !== undefined) resource.notes = req.notes;
+      if (req.status) resource.status = req.status;
+      if (req.due) resource.due = req.due;
+      var task = Tasks.Tasks.patch(resource, listId, req.task_id);
+      return _json({id: task.id, title: task.title, status: task.status});
+    } catch (e) {
+      return _json({error: 'Tasks API error', detail: e.message});
+    }
   }
 
   // --- Helpers ---

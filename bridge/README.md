@@ -71,16 +71,32 @@ curl -s -L -X POST 'YOUR_DEPLOYMENT_URL' \
 | Action | Description | Required Fields |
 |--------|-------------|-----------------|
 | `info` | Health check, list actions | — |
-| `gmail.send` | Send email | `to` (+ `subject`, `body`, `cc`, `bcc`, `html`, `replyTo`) |
+| `gmail.send` | Send email | `to` (+ `subject`, `body`, `cc`, `bcc`, `html`, `replyTo`, `inlineImages`, `attachments`) |
 | `gmail.check` | Search inbox | `query` (default: `is:unread`), `count` |
+| `gmail.get` | Get full thread | `thread_id` |
+| `gmail.read` | Mark thread read | `thread_id` |
+| `gmail.archive` | Archive thread | `thread_id` |
+| `gmail.reply` | Reply to thread | `thread_id`, `body` (+ `html`, `cc`, `inlineImages`) |
+| `gmail.label` | Add/remove label | `thread_id`, `add`, `remove` |
+| `gmail.attachments` | Get attachments | `message_id` or `thread_id` (+ `save_to_drive`) |
 | `sheets.read` | Read spreadsheet | `spreadsheet_id`, `range` |
 | `sheets.append` | Append rows | `spreadsheet_id`, `rows`, `sheet` |
+| `sheets.create` | Create spreadsheet | `name` (+ `headers`) |
+| `sheets.update` | Update cell range | `spreadsheet_id`, `range`, `values` |
 | `drive.list` | List/search files | `query`, `count` |
 | `drive.create` | Create file | `name`, `type`, `content`, `mime` |
-| `calendar.list` | Upcoming events | `days` (default: 7) |
+| `drive.upload` | Upload binary file | `name`, `data_base64` (+ `mime`, `folder_id`) |
+| `drive.download` | Download file as base64 | `id` |
+| `calendar.list` | Upcoming events | `days` (default: 7), `calendarId` |
+| `calendar.get` | Get single event | `event_id` (+ `calendarId`) |
+| `calendar.create` | Create event | `title`, `start`, `end` (+ `description`, `location`, `guests`, `calendarId`) |
+| `calendar.delete` | Delete event | `event_id` (+ `calendarId`) |
+| `calendar.calendars` | List all calendars | — |
 | `docs.create` | Create Google Doc | `title`, `body` |
 | `contacts.list` | List contacts | `count` |
 | `tasks.list` | List Google Tasks | — (requires Tasks API enabled) |
+| `tasks.create` | Create a task | `title` (+ `notes`, `due`, `status`, `list_id`) |
+| `tasks.update` | Update a task | `task_id` (+ `title`, `notes`, `status`, `due`, `list_id`) |
 | `translate` | Translate text | `text`, `from`, `to` |
 | `fetch` | HTTP proxy (disabled by default) | `url`, `method`, `headers`, `payload`, `contentType` |
 | `token.get` | Get OAuth token (disabled by default) | — |
