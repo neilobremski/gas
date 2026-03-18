@@ -79,7 +79,7 @@ curl -s -L -X POST 'YOUR_DEPLOYMENT_URL' \
 | `contacts.list` | List contacts | `count` (default: 20) |
 | `docs.create` | Create Google Doc | `title` (+ `body`) |
 | `drive.create` | Create file | `name` (+ `type`, `content`, `mime`) |
-| `drive.download` | Download file as base64 | `id` |
+| `drive.download` | Download file as base64 | `id` or `name` |
 | `drive.list` | List/search files | `query`, `count` (default: 10) |
 | `drive.upload` | Upload base64 file | `name`, `data_base64` (+ `mime`, `folder_id`) |
 | `fetch` | HTTP proxy (disabled by default) | `url` (+ `method`, `headers`, `payload`, `contentType`) |
@@ -96,10 +96,10 @@ curl -s -L -X POST 'YOUR_DEPLOYMENT_URL' \
 | `gmail.search` | Search email threads | `query` (default: `is:unread`), `count` (default: 10) |
 | `gmail.send` | Send email | `to` (+ `subject`, `body`, `cc`, `bcc`, `html`, `replyTo`, `inlineImages`, `driveImages`, `attachments`) |
 | `info` | Health check, list actions | -- |
-| `sheets.append` | Append rows | `spreadsheet_id`, `rows` (+ `sheet`) |
+| `sheets.append` | Append rows | `spreadsheet_id` or `name`, `rows` (+ `sheet`) |
 | `sheets.create` | Create spreadsheet | `name` (+ `headers`) |
-| `sheets.read` | Read spreadsheet | `spreadsheet_id` (+ `range`) |
-| `sheets.update` | Write values to range | `spreadsheet_id`, `range`, `values` |
+| `sheets.read` | Read spreadsheet | `spreadsheet_id` or `name` (+ `range`) |
+| `sheets.update` | Write values to range | `spreadsheet_id` or `name`, `range`, `values` |
 | `tasks.create` | Create a task | `title` (+ `list_id`, `notes`, `due`, `status`) |
 | `tasks.list` | List Google Tasks | -- (requires Tasks API enabled) |
 | `tasks.update` | Update a task | `task_id`, `list_id` (+ `title`, `notes`, `status`, `due`) |
@@ -109,6 +109,21 @@ curl -s -L -X POST 'YOUR_DEPLOYMENT_URL' \
 Every request is a JSON POST with at minimum `{"action": "...", "key": "..."}`.
 
 Every response is JSON with either the result or `{"error": "..."}`.
+
+### Name Resolution
+
+Actions that normally require an ID (`spreadsheet_id`, `id`) also accept `name` as an alternative. The bridge searches Drive for a file with that exact title and uses the newest match. This saves a round-trip compared to calling `drive.list` first.
+
+```bash
+# These are equivalent:
+gas sheets.read spreadsheet_id=1wCyx...
+gas sheets.read name=Tadpole
+
+# Works for drive.download too:
+gas drive.download name="My File.pdf"
+```
+
+If multiple files share the same name, the most recently updated one is used.
 
 ## Security
 
