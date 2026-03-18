@@ -237,7 +237,8 @@ var Bridge = (function() {
   }
 
   function _driveDownload(req) {
-    if (!req.id) return _json({error: 'missing id'});
+    if (!req.id && req.name) req.id = _resolveByName(req.name);
+    if (!req.id) return _json({error: 'missing id or name'});
     var file = DriveApp.getFileById(req.id);
     var blob = file.getBlob();
     return _json({
@@ -554,7 +555,8 @@ var Bridge = (function() {
   // =========================================================================
 
   function _sheetsAppend(req) {
-    if (!req.spreadsheet_id) return _json({error: 'missing spreadsheet_id'});
+    if (!req.spreadsheet_id && req.name) req.spreadsheet_id = _resolveByName(req.name, 'application/vnd.google-apps.spreadsheet');
+    if (!req.spreadsheet_id) return _json({error: 'missing spreadsheet_id or name'});
     if (!req.rows || !req.rows.length) return _json({error: 'no rows'});
     var sheet = SpreadsheetApp.openById(req.spreadsheet_id).getSheetByName(req.sheet || 'Sheet1');
     if (!sheet) return _json({error: 'sheet not found'});
@@ -570,7 +572,8 @@ var Bridge = (function() {
   }
 
   function _sheetsRead(req) {
-    if (!req.spreadsheet_id) return _json({error: 'missing spreadsheet_id'});
+    if (!req.spreadsheet_id && req.name) req.spreadsheet_id = _resolveByName(req.name, 'application/vnd.google-apps.spreadsheet');
+    if (!req.spreadsheet_id) return _json({error: 'missing spreadsheet_id or name'});
     var data = SpreadsheetApp.openById(req.spreadsheet_id)
       .getRange(req.range || 'Sheet1!A1:Z100').getValues();
     while (data.length > 0 && data[data.length - 1].every(function(c) { return c === ''; })) data.pop();
@@ -578,7 +581,8 @@ var Bridge = (function() {
   }
 
   function _sheetsUpdate(req) {
-    if (!req.spreadsheet_id) return _json({error: 'missing spreadsheet_id'});
+    if (!req.spreadsheet_id && req.name) req.spreadsheet_id = _resolveByName(req.name, 'application/vnd.google-apps.spreadsheet');
+    if (!req.spreadsheet_id) return _json({error: 'missing spreadsheet_id or name'});
     if (!req.range) return _json({error: 'missing range'});
     if (!req.values) return _json({error: 'missing values (2D array)'});
     SpreadsheetApp.openById(req.spreadsheet_id).getRange(req.range).setValues(req.values);
@@ -732,6 +736,19 @@ var Bridge = (function() {
   // Convert 4-byte emoji (astral plane, U+10000+) to HTML numeric entities.
   // GAS's JS runtime uses UCS-2 and mangles surrogate pairs. Email clients
   // render &#x1F419; as the octopus emoji correctly.
+  function _resolveByName(name, mimeType) {
+    // Search Drive by name (and optionally MIME type). Returns newest match or null.
+    var query = "title = '" + name.replace(/'/g, "\\'") + "'";
+    if (mimeType) query += " and mimeType = '" + mimeType + "'";
+    var iter = DriveApp.searchFiles(query);
+    var best = null;
+    while (iter.hasNext()) {
+      var f = iter.next();
+      if (!best || f.getLastUpdated() > best.getLastUpdated()) best = f;
+    }
+    return best ? best.getId() : null;
+  }
+
   function _escapeAstral(str) {
     if (!str) return str;
     return str.replace(/[\uD800-\uDBFF][\uDC00-\uDFFF]/g, function(pair) {
