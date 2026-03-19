@@ -488,7 +488,7 @@ var Bridge = (function() {
         to: m.getTo(),
         cc: m.getCc(),
         date: m.getDate().toISOString(),
-        plain: m.getPlainBody().substring(0, 300),
+        plain: m.getPlainBody(),
         html: m.getBody(),
         attachments: m.getAttachments().map(function(a) {
           return {name: a.getName(), type: a.getContentType(), size: a.getSize()};
