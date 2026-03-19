@@ -68,6 +68,7 @@ var Bridge = (function() {
     'docs.create':        _docsCreate,
     'drive.create':       _driveCreate,
     'drive.download':     _driveDownload,
+    'drive.folders':      _driveFolders,
     'drive.list':         _driveList,
     'drive.upload':       _driveUpload,
     'fetch':              _fetch,
@@ -225,13 +226,22 @@ var Bridge = (function() {
     if (!req.name) return _json({error: 'missing name'});
     var type = req.type || 'document';
     var file;
-    if (type === 'spreadsheet') {
+    if (type === 'folder') {
+      var parent = req.folder_id ? DriveApp.getFolderById(req.folder_id) : DriveApp.getRootFolder();
+      var folder = parent.createFolder(req.name);
+      return _json({id: folder.getId(), name: folder.getName(), url: folder.getUrl()});
+    } else if (type === 'spreadsheet') {
       file = SpreadsheetApp.create(req.name);
     } else if (type === 'document') {
       file = DocumentApp.create(req.name);
     } else {
       file = DriveApp.createFile(req.name, req.content || '', req.mime || 'text/plain');
-      return _json({id: file.getId(), name: file.getName(), url: file.getUrl()});
+    }
+    // Move to target folder if specified (Spreadsheet/Document APIs create in root)
+    if (req.folder_id) {
+      var driveFile = DriveApp.getFileById(file.getId());
+      DriveApp.getFolderById(req.folder_id).addFile(driveFile);
+      DriveApp.getRootFolder().removeFile(driveFile);
     }
     return _json({id: file.getId(), name: req.name, url: file.getUrl()});
   }
@@ -251,16 +261,64 @@ var Bridge = (function() {
   }
 
   function _driveList(req) {
-    var iter = req.query ? DriveApp.searchFiles(req.query) : DriveApp.getFiles();
     var files = [], count = req.count || 10;
-    while (iter.hasNext() && files.length < count) {
-      var f = iter.next();
-      files.push({
-        id: f.getId(), name: f.getName(), type: f.getMimeType(),
-        size: f.getSize(), url: f.getUrl(), updated: f.getLastUpdated().toISOString()
+    var query = req.query || '';
+
+    // Detect if the query specifically targets folders via mimeType
+    var folderMime = "application/vnd.google-apps.folder";
+    var wantsFolders = query.indexOf(folderMime) !== -1;
+    // Build a folder-safe query by stripping the mimeType = folder clause
+    var folderQuery = query
+      .replace(/\s*and\s+mimeType\s*=\s*'application\/vnd\.google-apps\.folder'/i, '')
+      .replace(/mimeType\s*=\s*'application\/vnd\.google-apps\.folder'\s*and\s*/i, '')
+      .replace(/mimeType\s*=\s*'application\/vnd\.google-apps\.folder'/i, '')
+      .replace(/^\s+|\s+$/g, '');
+
+    // Search files (skip if query explicitly asks for folders only)
+    if (!wantsFolders) {
+      var fileIter = query ? DriveApp.searchFiles(query) : DriveApp.getFiles();
+      while (fileIter.hasNext() && files.length < count) {
+        var f = fileIter.next();
+        files.push({
+          id: f.getId(), name: f.getName(), type: f.getMimeType(),
+          size: f.getSize(), url: f.getUrl(), updated: f.getLastUpdated().toISOString()
+        });
+      }
+    }
+
+    // Also search folders (DriveApp.searchFiles skips folders entirely)
+    if (files.length < count) {
+      var folderIter = folderQuery ? DriveApp.searchFolders(folderQuery) : DriveApp.getFolders();
+      while (folderIter.hasNext() && files.length < count) {
+        var d = folderIter.next();
+        files.push({
+          id: d.getId(), name: d.getName(), type: folderMime,
+          size: 0, url: d.getUrl(), updated: d.getLastUpdated().toISOString()
+        });
+      }
+    }
+
+    return _json({files: files, count: files.length});
+  }
+
+  function _driveFolders(req) {
+    // Create a folder
+    if (req.create) {
+      var parent = req.parent_id ? DriveApp.getFolderById(req.parent_id) : DriveApp.getRootFolder();
+      var newFolder = parent.createFolder(req.create);
+      return _json({id: newFolder.getId(), name: newFolder.getName(), url: newFolder.getUrl()});
+    }
+    // List / search folders
+    var folders = [], count = req.count || 20;
+    var iter = req.query ? DriveApp.searchFolders(req.query) : DriveApp.getFolders();
+    while (iter.hasNext() && folders.length < count) {
+      var d = iter.next();
+      folders.push({
+        id: d.getId(), name: d.getName(), url: d.getUrl(),
+        updated: d.getLastUpdated().toISOString()
       });
     }
-    return _json({files: files, count: files.length});
+    return _json({folders: folders, count: folders.length});
   }
 
   function _driveUpload(req) {
@@ -740,11 +798,22 @@ var Bridge = (function() {
     // Search Drive by name (and optionally MIME type). Returns newest match or null.
     var query = "title = '" + name.replace(/'/g, "\\'") + "'";
     if (mimeType) query += " and mimeType = '" + mimeType + "'";
-    var iter = DriveApp.searchFiles(query);
     var best = null;
+
+    // Search files first
+    var iter = DriveApp.searchFiles(query);
     while (iter.hasNext()) {
       var f = iter.next();
       if (!best || f.getLastUpdated() > best.getLastUpdated()) best = f;
+    }
+    // Also search folders (DriveApp.searchFiles skips folders entirely)
+    if (!mimeType || mimeType === 'application/vnd.google-apps.folder') {
+      var folderQuery = "title = '" + name.replace(/'/g, "\\'") + "'";
+      var fIter = DriveApp.searchFolders(folderQuery);
+      while (fIter.hasNext()) {
+        var d = fIter.next();
+        if (!best || d.getLastUpdated() > best.getLastUpdated()) best = d;
+      }
     }
     return best ? best.getId() : null;
   }
