@@ -78,10 +78,13 @@ curl -s -L -X POST 'YOUR_DEPLOYMENT_URL' \
 | `config.set` | Write Script Properties (disabled by default) | `config` (object of key-value pairs) |
 | `contacts.list` | List contacts | `count` (default: 20) |
 | `docs.create` | Create Google Doc | `title` (+ `body`) |
-| `drive.create` | Create file | `name` (+ `type`, `content`, `mime`) |
+| `drive.create` | Create file | `name` (+ `type`, `content`, `mime`, `folder_id`) |
+| `drive.delete` | Trash a file or folder | `id` |
 | `drive.download` | Download file as base64 | `id` or `name` |
-| `drive.list` | List/search files | `query`, `count` (default: 10) |
-| `drive.upload` | Upload base64 file | `name`, `data_base64` (+ `mime`, `folder_id`) |
+| `drive.folders` | List/search/create folders | `query`, `count` (+ `create`, `parent_id`) |
+| `drive.list` | List/search files and folders | `query`, `count` (default: 10) |
+| `drive.upload` | Upload base64 file (always creates) | `name`, `data_base64` (+ `mime`, `folder_id`) |
+| `drive.upsert` | Upload or replace by name | `name`, `data_base64` (+ `mime`, `folder_id`) |
 | `fetch` | HTTP proxy (disabled by default) | `url` (+ `method`, `headers`, `payload`, `contentType`) |
 | `gmail.archive` | Archive and mark read | `thread_id` |
 | `gmail.attachments` | Get/save attachments | `message_id` or `thread_id` (+ `save_to_drive`, `folder_id`) |

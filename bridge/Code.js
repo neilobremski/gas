@@ -1,5 +1,5 @@
 /*
- * GAS Bridge v2.0 — Turn Google Apps Script Into a Key-Based API
+ * GAS Bridge v2.4 — Turn Google Apps Script Into a Key-Based API
  *
  * Deploys as a Web App and exposes Google Workspace services (Gmail, Drive,
  * Sheets, Calendar, Docs, Contacts, Translate, and Tasks) via simple JSON POST
@@ -67,10 +67,12 @@ var Bridge = (function() {
     'contacts.list':      _contactsList,
     'docs.create':        _docsCreate,
     'drive.create':       _driveCreate,
+    'drive.delete':       _driveDelete,
     'drive.download':     _driveDownload,
     'drive.folders':      _driveFolders,
     'drive.list':         _driveList,
     'drive.upload':       _driveUpload,
+    'drive.upsert':       _driveUpsert,
     'fetch':              _fetch,
     'gemini.ask':         _geminiAsk,
     'gmail.archive':      _gmailArchive,
@@ -328,6 +330,46 @@ var Bridge = (function() {
     var folder = req.folder_id ? DriveApp.getFolderById(req.folder_id) : DriveApp.getRootFolder();
     var file = folder.createFile(blob);
     return _json({id: file.getId(), name: file.getName(), url: file.getUrl(), size: file.getSize()});
+  }
+
+  function _driveUpsert(req) {
+    if (!req.name) return _json({error: 'missing name'});
+    if (!req.data_base64) return _json({error: 'missing data_base64'});
+    var blob = Utilities.newBlob(Utilities.base64Decode(req.data_base64), req.mime || 'application/octet-stream', req.name);
+    var folder = req.folder_id ? DriveApp.getFolderById(req.folder_id) : DriveApp.getRootFolder();
+
+    // Trash any existing file with the same name in this folder.
+    // Note: not atomic — concurrent upserts with the same name could
+    // both trash and both create, leaving duplicates. Acceptable for
+    // single-client usage (organs don't run concurrently on same file).
+    var replaced = false;
+    var existing = folder.getFilesByName(req.name);
+    while (existing.hasNext()) {
+      existing.next().setTrashed(true);
+      replaced = true;
+    }
+
+    var file = folder.createFile(blob);
+    return _json({id: file.getId(), name: file.getName(), url: file.getUrl(), size: file.getSize(), replaced: replaced});
+  }
+
+  function _driveDelete(req) {
+    if (!req.id) return _json({error: 'missing id'});
+    try {
+      var file = DriveApp.getFileById(req.id);
+      var name = file.getName();
+      file.setTrashed(true);
+      return _json({status: 'trashed', id: req.id, name: name});
+    } catch(e) {
+      try {
+        var folder = DriveApp.getFolderById(req.id);
+        var name = folder.getName();
+        folder.setTrashed(true);
+        return _json({status: 'trashed', id: req.id, name: name});
+      } catch(e2) {
+        return _json({error: 'not found: ' + req.id});
+      }
+    }
   }
 
   // =========================================================================
@@ -601,7 +643,7 @@ var Bridge = (function() {
   function _info(req) {
     return _json({
       service: 'GAS Bridge',
-      version: '2.0',
+      version: '2.4',
       account: Session.getActiveUser().getEmail(),
       actions: Object.keys(HANDLERS),
       timestamp: new Date().toISOString()
