@@ -1,5 +1,5 @@
 /*
- * GAS Bridge v2.4 — Turn Google Apps Script Into a Key-Based API
+ * GAS Bridge v2.5 — Turn Google Apps Script Into a Key-Based API
  *
  * Deploys as a Web App and exposes Google Workspace services (Gmail, Drive,
  * Sheets, Calendar, Docs, Contacts, Translate, and Tasks) via simple JSON POST
@@ -265,6 +265,12 @@ var Bridge = (function() {
   function _driveList(req) {
     var files = [], count = req.count || 10;
     var query = req.query || '';
+
+    // If folder_id is provided, scope results to that folder
+    if (req.folder_id) {
+      var parentClause = "'" + req.folder_id + "' in parents";
+      query = query ? (parentClause + ' and ' + query) : parentClause;
+    }
 
     // Detect if the query specifically targets folders via mimeType
     var folderMime = "application/vnd.google-apps.folder";
@@ -643,7 +649,7 @@ var Bridge = (function() {
   function _info(req) {
     return _json({
       service: 'GAS Bridge',
-      version: '2.4',
+      version: '2.5',
       account: Session.getActiveUser().getEmail(),
       actions: Object.keys(HANDLERS),
       timestamp: new Date().toISOString()
