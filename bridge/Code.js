@@ -1,7 +1,13 @@
 /*
- * GAS Bridge v2.5 — Turn Google Apps Script Into a Key-Based API
- *
- * Deploys as a Web App and exposes Google Workspace services (Gmail, Drive,
+ * GAS Bridge v2.6 — Turn Google Apps Script Into a Key-Based API
+
+
+
+
+
+
+
+
  * Sheets, Calendar, Docs, Contacts, Translate, and Tasks) via simple JSON POST
  * requests. Authentication uses a shared secret key stored in Script Properties.
  *
@@ -101,9 +107,7 @@ var Bridge = (function() {
     'translate':          _translate,
   };
 
-  // =========================================================================
   //  Calendar
-  // =========================================================================
 
   function _calendarCalendars(req) {
     var calendars = CalendarApp.getAllCalendars().map(function(cal) {
@@ -154,9 +158,7 @@ var Bridge = (function() {
     return _json({events: events, count: events.length});
   }
 
-  // =========================================================================
   //  Config (disabled by default — run Bridge.enableConfig() to enable)
-  // =========================================================================
 
   var PROTECTED_KEYS = ['BRIDGE_KEY'];
 
@@ -190,9 +192,7 @@ var Bridge = (function() {
     return _json({status: 'ok', properties_set: set});
   }
 
-  // =========================================================================
   //  Contacts
-  // =========================================================================
 
   function _contactsList(req) {
     var contacts = ContactsApp.getContacts();
@@ -209,9 +209,7 @@ var Bridge = (function() {
     return _json({contacts: results, count: results.length});
   }
 
-  // =========================================================================
   //  Docs
-  // =========================================================================
 
   function _docsCreate(req) {
     if (!req.title) return _json({error: 'missing title'});
@@ -220,9 +218,7 @@ var Bridge = (function() {
     return _json({id: doc.getId(), title: req.title, url: doc.getUrl()});
   }
 
-  // =========================================================================
   //  Drive
-  // =========================================================================
 
   function _driveCreate(req) {
     if (!req.name) return _json({error: 'missing name'});
@@ -378,13 +374,9 @@ var Bridge = (function() {
     }
   }
 
-  // =========================================================================
   //  Gmail
-  // =========================================================================
 
-  // =========================================================================
   //  Gemini (uses API key from Script Properties, or falls back to OAuth)
-  // =========================================================================
 
   function _geminiAsk(req) {
     if (!req.prompt) return _json({error: 'missing prompt'});
@@ -412,9 +404,7 @@ var Bridge = (function() {
     return _json({text: text, model: model, usage: data.usageMetadata || {}});
   }
 
-  // =========================================================================
   //  Gmail
-  // =========================================================================
 
   function _gmailArchive(req) {
     if (!req.thread_id) return _json({error: 'missing thread_id'});
@@ -460,7 +450,7 @@ var Bridge = (function() {
   function _gmailDraftCreate(req) {
     if (!req.to) return _json({error: 'missing "to"'});
     var draft = GmailApp.createDraft(req.to, req.subject || '(no subject)', req.body || '',
-      req.html ? {htmlBody: req.body} : {});
+      req.html ? {htmlBody: req.html} : {});
     var msg = draft.getMessage();
     return _json({id: draft.getId(), message_id: msg.getId(), to: req.to, subject: req.subject});
   }
@@ -582,7 +572,7 @@ var Bridge = (function() {
       }
     }
     var opts = {};
-    if (req.html) opts.htmlBody = _escapeAstral(req.body);
+    if (req.html) opts.htmlBody = _escapeAstral(req.html);
     if (req.cc) opts.cc = req.cc;
     if (req.inlineImages) {
       var imgs = {};
@@ -618,7 +608,7 @@ var Bridge = (function() {
     var opts = {};
     if (req.cc) opts.cc = req.cc;
     if (req.bcc) opts.bcc = req.bcc;
-    if (req.html) opts.htmlBody = _escapeAstral(req.body);
+    if (req.html) opts.htmlBody = _escapeAstral(req.html);
     if (req.replyTo) opts.replyTo = req.replyTo;
     // Client-side inline images (base64 from caller)
     if (req.inlineImages) {
@@ -642,23 +632,19 @@ var Bridge = (function() {
     return _json({status: 'sent', to: req.to, subject: req.subject});
   }
 
-  // =========================================================================
   //  Info
-  // =========================================================================
 
   function _info(req) {
     return _json({
       service: 'GAS Bridge',
-      version: '2.5',
+      version: '2.6',
       account: Session.getActiveUser().getEmail(),
       actions: Object.keys(HANDLERS),
       timestamp: new Date().toISOString()
     });
   }
 
-  // =========================================================================
   //  Sheets
-  // =========================================================================
 
   function _sheetsAppend(req) {
     if (!req.spreadsheet_id && req.name) req.spreadsheet_id = _resolveByName(req.name, 'application/vnd.google-apps.spreadsheet');
@@ -695,9 +681,7 @@ var Bridge = (function() {
     return _json({status: 'updated', range: req.range});
   }
 
-  // =========================================================================
   //  Tasks
-  // =========================================================================
 
   function _tasksCreate(req) {
     try {
@@ -753,9 +737,7 @@ var Bridge = (function() {
     }
   }
 
-  // =========================================================================
   //  Translate
-  // =========================================================================
 
   function _translate(req) {
     if (!req.text) return _json({error: 'missing text'});
@@ -763,9 +745,7 @@ var Bridge = (function() {
     return _json({translated: result, from: req.from || 'auto', to: req.to || 'en'});
   }
 
-  // =========================================================================
   //  Fetch (disabled by default — run Bridge.enableFetch() to enable)
-  // =========================================================================
 
   function _fetch(req) {
     if (!_isEnabled('FETCH_ENABLED')) {
@@ -782,9 +762,7 @@ var Bridge = (function() {
     return _json({status: resp.getResponseCode(), headers: resp.getHeaders(), body: body});
   }
 
-  // =========================================================================
   //  Token (disabled by default — run Bridge.enableTokenGet() to enable)
-  // =========================================================================
 
   function _tokenGet(req) {
     if (!_isEnabled('TOKEN_GET_ENABLED')) {
@@ -797,9 +775,7 @@ var Bridge = (function() {
     });
   }
 
-  // =========================================================================
   //  Helpers
-  // =========================================================================
 
   // Pull images from Google Drive and attach inline. Zero transfer cost from the client.
   // driveImages: array of Drive file IDs. Small files (<0.5MB) become CID inline attachments.
@@ -885,9 +861,7 @@ var Bridge = (function() {
       .setMimeType(ContentService.MimeType.JSON);
   }
 
-  // =========================================================================
   //  Setup Functions (run from the Apps Script editor)
-  // =========================================================================
 
   function initKey() {
     var key = Utilities.getUuid();
