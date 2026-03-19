@@ -82,7 +82,7 @@ curl -s -L -X POST 'YOUR_DEPLOYMENT_URL' \
 | `drive.delete` | Trash a file or folder | `id` |
 | `drive.download` | Download file as base64 | `id` or `name` |
 | `drive.folders` | List/search/create folders | `query`, `count` (+ `create`, `parent_id`) |
-| `drive.list` | List/search files and folders | `query`, `count` (default: 10) |
+| `drive.list` | List/search files and folders | `query`, `count` (+ `folder_id` to scope to a folder) |
 | `drive.upload` | Upload base64 file (always creates) | `name`, `data_base64` (+ `mime`, `folder_id`) |
 | `drive.upsert` | Upload or replace by name | `name`, `data_base64` (+ `mime`, `folder_id`) |
 | `fetch` | HTTP proxy (disabled by default) | `url` (+ `method`, `headers`, `payload`, `contentType`) |
