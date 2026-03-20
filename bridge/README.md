@@ -129,6 +129,32 @@ gas drive.download name="My File.pdf"
 
 If multiple files share the same name, the most recently updated one is used.
 
+## Quotas
+
+Every bridge call runs inside Google Apps Script, which has [daily quotas](https://developers.google.com/apps-script/guides/services/quotas) per Google account. The limits that matter most:
+
+| Resource | Consumer (gmail.com) | Google Workspace |
+|----------|---------------------|------------------|
+| **Email read/write** (search, get, label, reply, draft — everything except send) | **20,000/day** | 50,000/day |
+| **Email send** (recipients/day) | 100/day | 1,500/day |
+| **URL Fetch calls** (the `fetch` action) | 20,000/day | 100,000/day |
+| **Script runtime** per execution | 6 min | 6 min |
+| **Trigger total runtime** per day | 90 min | 6 hr |
+| **Properties read/write** | 50,000/day | 500,000/day |
+| **Properties storage** | 500 KB total | 500 KB total |
+| **Simultaneous executions** | 30/user | 30/user |
+
+The **email read/write** quota is the one you'll hit first. Every `gmail.search`, `gmail.get`, `gmail.label`, `gmail.reply` (the read/thread part), `gmail.archive`, `gmail.read`, and `gmail.draft.*` call counts against the 20K pool. A single "search + get + reply + label" cycle burns 4 quota units.
+
+Use `gas quota` to check remaining email quota at any time. If you hit the ceiling, enable `token.get` and call the [Gmail REST API](https://developers.google.com/gmail/api/reference/rest) directly — that uses the Gmail API's own quota (250 units/second) instead of the Apps Script pool.
+
+**References:**
+- [Apps Script Quotas](https://developers.google.com/apps-script/guides/services/quotas) — full daily limits table
+- [GmailApp Reference](https://developers.google.com/apps-script/reference/gmail/gmail-app) — GmailApp methods and per-method notes
+- [Gmail REST API](https://developers.google.com/gmail/api/reference/rest) — direct API (bypasses Apps Script quotas)
+- [DriveApp Reference](https://developers.google.com/apps-script/reference/drive/drive-app) — DriveApp methods
+- [Apps Script Dashboard](https://script.google.com/home/executions) — monitor executions and errors
+
 ## Security
 
 GAS Bridge uses a **shared secret key** stored in Script Properties (never in source code). This is simple and effective for personal use and trusted integrations, but it is not OAuth -- anyone with the key and the deployment URL has full access to the enabled services.
