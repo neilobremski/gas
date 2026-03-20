@@ -55,7 +55,17 @@ var Bridge = (function() {
       if (!handler) {
         return _json({error: 'unknown action', available: Object.keys(HANDLERS)});
       }
-      return handler(req);
+      var result = handler(req);
+      // Track usage counter per service per day (never break the request)
+      try {
+        var service = (req.action || '').indexOf('.') !== -1 ? req.action.split('.')[0] : req.action;
+        var today = Utilities.formatDate(new Date(), 'UTC', 'yyyy-MM-dd');
+        var usageKey = '_usage_' + service + '_' + today;
+        var props = PropertiesService.getScriptProperties();
+        var count = parseInt(props.getProperty(usageKey) || '0', 10);
+        props.setProperty(usageKey, String(count + 1));
+      } catch (e) { /* tracking must never break requests */ }
+      return result;
     } catch (err) {
       return _json({error: err.message});
     }
@@ -770,6 +780,29 @@ var Bridge = (function() {
     try { result.email_remaining = MailApp.getRemainingDailyQuota(); } catch (e) { result.email_error = e.message; }
     try { result.drive_limit_bytes = DriveApp.getStorageLimit(); result.drive_used_bytes = DriveApp.getStorageUsed(); } catch (e) { result.drive_error = e.message; }
     try { result.script_properties_count = Object.keys(PropertiesService.getScriptProperties().getProperties()).length; } catch (e) { result.properties_error = e.message; }
+    // Collect today's usage counters and clean up old ones
+    try {
+      var props = PropertiesService.getScriptProperties();
+      var all = props.getProperties();
+      var today = Utilities.formatDate(new Date(), 'UTC', 'yyyy-MM-dd');
+      var todaySuffix = '_' + today;
+      var usage = {};
+      var staleKeys = [];
+      for (var k in all) {
+        if (k.indexOf('_usage_') !== 0) continue;
+        if (k.indexOf(todaySuffix, k.length - todaySuffix.length) !== -1) {
+          // Key ends with today's date — extract service name
+          var service = k.substring(7, k.length - todaySuffix.length);
+          usage[service] = parseInt(all[k], 10) || 0;
+        } else {
+          // Old usage key — mark for deletion (older than today)
+          staleKeys.push(k);
+        }
+      }
+      result.usage = usage;
+      // Clean up stale keys (older than today)
+      for (var i = 0; i < staleKeys.length; i++) props.deleteProperty(staleKeys[i]);
+    } catch (e) { result.usage_error = e.message; }
     result.timestamp = new Date().toISOString();
     return _json(result);
   }
