@@ -103,6 +103,7 @@ var Bridge = (function() {
     'tasks.create':       _tasksCreate,
     'tasks.list':         _tasksList,
     'tasks.update':       _tasksUpdate,
+    'quota':              _quota,
     'token.get':          _tokenGet,
     'translate':          _translate,
   };
@@ -760,6 +761,17 @@ var Bridge = (function() {
     var body = resp.getContentText();
     try { body = JSON.parse(body); } catch (e) {}
     return _json({status: resp.getResponseCode(), headers: resp.getHeaders(), body: body});
+  }
+
+  //  Quota
+
+  function _quota(req) {
+    var result = {};
+    try { result.email_remaining = MailApp.getRemainingDailyQuota(); } catch (e) { result.email_error = e.message; }
+    try { result.drive_limit_bytes = DriveApp.getStorageLimit(); result.drive_used_bytes = DriveApp.getStorageUsed(); } catch (e) { result.drive_error = e.message; }
+    try { result.script_properties_count = Object.keys(PropertiesService.getScriptProperties().getProperties()).length; } catch (e) {}
+    result.timestamp = new Date().toISOString();
+    return _json(result);
   }
 
   //  Token (disabled by default — run Bridge.enableTokenGet() to enable)
