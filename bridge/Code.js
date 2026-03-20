@@ -1,5 +1,5 @@
 /*
- * GAS Bridge v2.6 — Turn Google Apps Script Into a Key-Based API
+ * GAS Bridge v2.7 — Turn Google Apps Script Into a Key-Based API
 
 
 
@@ -637,7 +637,7 @@ var Bridge = (function() {
   function _info(req) {
     return _json({
       service: 'GAS Bridge',
-      version: '2.6',
+      version: '2.7',
       account: Session.getActiveUser().getEmail(),
       actions: Object.keys(HANDLERS),
       timestamp: new Date().toISOString()
@@ -944,3 +944,14 @@ var Bridge = (function() {
 // Top-level entry points required by Google Apps Script Web App
 function doGet(e)  { return Bridge.doGet(e); }
 function doPost(e) { return Bridge.doPost(e); }
+
+// Admin functions — top-level wrappers so GAS editor can run them
+function initKey()          { return Bridge.initKey(); }
+function getKey()           { return Bridge.getKey(); }
+function activateScopes()   { return Bridge.activateScopes(); }
+function enableFetch()      { return Bridge.enableFetch(); }
+function disableFetch()     { return Bridge.disableFetch(); }
+function enableTokenGet()   { return Bridge.enableTokenGet(); }
+function disableTokenGet()  { return Bridge.disableTokenGet(); }
+function enableConfig()     { return Bridge.enableConfig(); }
+function disableConfig()    { return Bridge.disableConfig(); }
