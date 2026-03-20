@@ -1,5 +1,5 @@
 /*
- * GAS Bridge v2.7 — Turn Google Apps Script Into a Key-Based API
+ * GAS Bridge v2.8 — Turn Google Apps Script Into a Key-Based API
 
 
 
@@ -65,6 +65,7 @@ var Bridge = (function() {
         var count = parseInt(props.getProperty(usageKey) || '0', 10);
         props.setProperty(usageKey, String(count + 1));
       } catch (e) { /* tracking must never break requests */ }
+      _logRequest(req.action, req, result);
       return result;
     } catch (err) {
       return _json({error: err.message});
@@ -648,7 +649,7 @@ var Bridge = (function() {
   function _info(req) {
     return _json({
       service: 'GAS Bridge',
-      version: '2.7',
+      version: '2.8',
       account: Session.getActiveUser().getEmail(),
       actions: Object.keys(HANDLERS),
       timestamp: new Date().toISOString()
@@ -899,6 +900,42 @@ var Bridge = (function() {
     return PropertiesService.getScriptProperties().getProperty(property) === 'true';
   }
 
+  function _logRequest(action, req, result) {
+    if (!_isEnabled('LOGGING_ENABLED')) return;
+    try {
+      var today = Utilities.formatDate(new Date(), 'UTC', 'yyyy-MM-dd');
+      var sheetName = 'GAS Log ' + today;
+      var propKey = '_log_sheet_' + today;
+      var props = PropertiesService.getScriptProperties();
+      var ssId = props.getProperty(propKey);
+      var ss;
+      if (ssId) {
+        try { ss = SpreadsheetApp.openById(ssId); } catch (e) { ssId = null; }
+      }
+      if (!ssId) {
+        ss = SpreadsheetApp.create(sheetName);
+        ss.getActiveSheet().appendRow(['Timestamp', 'Action', 'Params', 'Status']);
+        props.setProperty(propKey, ss.getId());
+      }
+      var paramKeys = Object.keys(req).filter(function(k) { return k !== 'key'; }).join(', ');
+      var status = 'ok';
+      try {
+        var parsed = JSON.parse(result.getContent());
+        if (parsed.error) {
+          status = 'error: ' + parsed.error;
+        } else if (typeof parsed.count === 'number') {
+          status = 'ok (' + parsed.count + ' items)';
+        }
+      } catch (e) { /* leave as ok */ }
+      ss.getActiveSheet().appendRow([
+        new Date().toISOString(),
+        action,
+        paramKeys,
+        status
+      ]);
+    } catch (e) { /* logging must NEVER break the actual request */ }
+  }
+
   function _json(obj) {
     // ContentService defaults to UTF-8. Do NOT call setCharset() — it has caused
     // bridge-down crashes in production (see commit 7b9ca9e). The default is correct.
@@ -969,6 +1006,16 @@ var Bridge = (function() {
     Logger.log('config.get and config.set actions DISABLED.');
   }
 
+  function enableLogging() {
+    PropertiesService.getScriptProperties().setProperty('LOGGING_ENABLED', 'true');
+    Logger.log('Request logging ENABLED. Logs written to "GAS Log YYYY-MM-DD" spreadsheets.');
+  }
+
+  function disableLogging() {
+    PropertiesService.getScriptProperties().deleteProperty('LOGGING_ENABLED');
+    Logger.log('Request logging DISABLED.');
+  }
+
   // Public API
   return {
     doGet: doGet,
@@ -981,7 +1028,9 @@ var Bridge = (function() {
     enableTokenGet: enableTokenGet,
     disableTokenGet: disableTokenGet,
     enableConfig: enableConfig,
-    disableConfig: disableConfig
+    disableConfig: disableConfig,
+    enableLogging: enableLogging,
+    disableLogging: disableLogging
   };
 
 })();
@@ -1000,3 +1049,5 @@ function enableTokenGet()   { return Bridge.enableTokenGet(); }
 function disableTokenGet()  { return Bridge.disableTokenGet(); }
 function enableConfig()     { return Bridge.enableConfig(); }
 function disableConfig()    { return Bridge.disableConfig(); }
+function enableLogging()    { return Bridge.enableLogging(); }
+function disableLogging()   { return Bridge.disableLogging(); }
