@@ -96,6 +96,7 @@ var Bridge = (function() {
     'gmail.search':       _gmailSearch,
     'gmail.send':         _gmailSend,
     'info':               _info,
+    'quota':              _quota,
     'sheets.append':      _sheetsAppend,
     'sheets.create':      _sheetsCreate,
     'sheets.read':        _sheetsRead,
@@ -103,7 +104,6 @@ var Bridge = (function() {
     'tasks.create':       _tasksCreate,
     'tasks.list':         _tasksList,
     'tasks.update':       _tasksUpdate,
-    'quota':              _quota,
     'token.get':          _tokenGet,
     'translate':          _translate,
   };
@@ -769,7 +769,7 @@ var Bridge = (function() {
     var result = {};
     try { result.email_remaining = MailApp.getRemainingDailyQuota(); } catch (e) { result.email_error = e.message; }
     try { result.drive_limit_bytes = DriveApp.getStorageLimit(); result.drive_used_bytes = DriveApp.getStorageUsed(); } catch (e) { result.drive_error = e.message; }
-    try { result.script_properties_count = Object.keys(PropertiesService.getScriptProperties().getProperties()).length; } catch (e) {}
+    try { result.script_properties_count = Object.keys(PropertiesService.getScriptProperties().getProperties()).length; } catch (e) { result.properties_error = e.message; }
     result.timestamp = new Date().toISOString();
     return _json(result);
   }

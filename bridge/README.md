@@ -99,6 +99,7 @@ curl -s -L -X POST 'YOUR_DEPLOYMENT_URL' \
 | `gmail.search` | Search email threads | `query` (default: `is:unread`), `count` (default: 10) |
 | `gmail.send` | Send email | `to` (+ `subject`, `body`, `cc`, `bcc`, `html`, `replyTo`, `inlineImages`, `driveImages`, `attachments`) |
 | `info` | Health check, list actions | -- |
+| `quota` | Email remaining, Drive usage, properties count | -- |
 | `sheets.append` | Append rows | `spreadsheet_id` or `name`, `rows` (+ `sheet`) |
 | `sheets.create` | Create spreadsheet | `name` (+ `headers`) |
 | `sheets.read` | Read spreadsheet | `spreadsheet_id` or `name` (+ `range`) |
