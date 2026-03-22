@@ -552,13 +552,26 @@ var Bridge = (function() {
   function _gmailLabel(req) {
     if (!req.thread_id) return _json({error: 'missing thread_id'});
     var thread = GmailApp.getThreadById(req.thread_id);
-    if (req.add) {
-      var addLabel = GmailApp.getUserLabelByName(req.add) || GmailApp.createLabel(req.add);
-      thread.addLabel(addLabel);
-    }
     if (req.remove) {
-      var removeLabel = GmailApp.getUserLabelByName(req.remove);
-      if (removeLabel) thread.removeLabel(removeLabel);
+      if (req.remove === 'UNREAD') {
+        thread.markRead();
+      } else if (req.remove === 'STARRED') {
+        var msgs = thread.getMessages();
+        for (var i = 0; i < msgs.length; i++) { msgs[i].unstar(); }
+      } else {
+        var removeLabel = GmailApp.getUserLabelByName(req.remove);
+        if (removeLabel) thread.removeLabel(removeLabel);
+      }
+    }
+    if (req.add) {
+      if (req.add === 'UNREAD') {
+        thread.markUnread();
+      } else if (req.add === 'STARRED') {
+        thread.getMessages().forEach(function(m) { m.star(); });
+      } else {
+        var addLabel = GmailApp.getUserLabelByName(req.add) || GmailApp.createLabel(req.add);
+        thread.addLabel(addLabel);
+      }
     }
     return _json({status: 'labeled', thread_id: req.thread_id});
   }
