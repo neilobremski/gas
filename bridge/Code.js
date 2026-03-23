@@ -1,14 +1,8 @@
 /*
- * GAS Bridge v2.8 — Turn Google Apps Script Into a Key-Based API
-
-
-
-
-
-
-
-
- * Sheets, Calendar, Docs, Contacts, Translate, and Tasks) via simple JSON POST
+ * GAS Bridge v2.9 — Turn Google Apps Script Into a Key-Based API
+ *
+ * Exposes Google Workspace services (Gmail, Drive, Sheets, Calendar, Docs,
+ * Contacts, Translate, and Tasks) via simple JSON POST
  * requests. Authentication uses a shared secret key stored in Script Properties.
  *
  * Setup:
@@ -553,12 +547,24 @@ var Bridge = (function() {
     if (!req.thread_id) return _json({error: 'missing thread_id'});
     var thread = GmailApp.getThreadById(req.thread_id);
     if (req.add) {
-      var addLabel = GmailApp.getUserLabelByName(req.add) || GmailApp.createLabel(req.add);
-      thread.addLabel(addLabel);
+      if (req.add === 'UNREAD') {
+        thread.markUnread();
+      } else if (req.add === 'STARRED') {
+        thread.getMessages().forEach(function(m) { m.star(); });
+      } else {
+        var addLabel = GmailApp.getUserLabelByName(req.add) || GmailApp.createLabel(req.add);
+        thread.addLabel(addLabel);
+      }
     }
     if (req.remove) {
-      var removeLabel = GmailApp.getUserLabelByName(req.remove);
-      if (removeLabel) thread.removeLabel(removeLabel);
+      if (req.remove === 'UNREAD') {
+        thread.markRead();
+      } else if (req.remove === 'STARRED') {
+        thread.getMessages().forEach(function(m) { m.unstar(); });
+      } else {
+        var removeLabel = GmailApp.getUserLabelByName(req.remove);
+        if (removeLabel) thread.removeLabel(removeLabel);
+      }
     }
     return _json({status: 'labeled', thread_id: req.thread_id});
   }
@@ -649,7 +655,7 @@ var Bridge = (function() {
   function _info(req) {
     return _json({
       service: 'GAS Bridge',
-      version: '2.8',
+      version: '2.9',
       account: Session.getActiveUser().getEmail(),
       actions: Object.keys(HANDLERS),
       timestamp: new Date().toISOString()
