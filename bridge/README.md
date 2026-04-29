@@ -148,6 +148,8 @@ The **email read/write** quota is the one you'll hit first. Every `gmail.search`
 
 Use `gas quota` to check remaining email quota at any time. If you hit the ceiling, enable `token.get` and call the [Gmail REST API](https://developers.google.com/gmail/api/reference/rest) directly — that uses the Gmail API's own quota (250 units/second) instead of the Apps Script pool.
 
+Stale `_usage_*` and `_log_sheet_*` properties older than 7 days are pruned automatically on day rollover, so the 500 KB Script Properties ceiling stays well clear of leaked daily counters. The `quota` action's manual cleanup remains as a catch-all but is no longer required for routine operation. The day-rollover check runs at most once per UTC day per request.
+
 **References:**
 - [Apps Script Quotas](https://developers.google.com/apps-script/guides/services/quotas) — full daily limits table
 - [GmailApp Reference](https://developers.google.com/apps-script/reference/gmail/gmail-app) — GmailApp methods and per-method notes
