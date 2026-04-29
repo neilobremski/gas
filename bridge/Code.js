@@ -1,5 +1,5 @@
 /*
- * GAS Bridge v2.9 — Turn Google Apps Script Into a Key-Based API
+ * GAS Bridge v2.10 — Turn Google Apps Script Into a Key-Based API
  *
  * Exposes Google Workspace services (Gmail, Drive, Sheets, Calendar, Docs,
  * Contacts, Translate, and Tasks) via simple JSON POST
@@ -49,6 +49,7 @@ var Bridge = (function() {
       if (!handler) {
         return _json({error: 'unknown action', available: Object.keys(HANDLERS)});
       }
+      try { _pruneStaleProperties(); } catch (e) { /* pruning must never break requests */ }
       var result = handler(req);
       // Track usage counter per service per day (never break the request)
       try {
@@ -655,7 +656,7 @@ var Bridge = (function() {
   function _info(req) {
     return _json({
       service: 'GAS Bridge',
-      version: '2.9',
+      version: '2.10',
       account: Session.getActiveUser().getEmail(),
       actions: Object.keys(HANDLERS),
       timestamp: new Date().toISOString()
@@ -904,6 +905,28 @@ var Bridge = (function() {
 
   function _isEnabled(property) {
     return PropertiesService.getScriptProperties().getProperty(property) === 'true';
+  }
+
+  // Prune stale `_usage_<service>_<date>` and `_log_sheet_<date>` properties
+  // older than 7 days. Gated on day rollover via `_usage_last_date` so this is
+  // a cheap no-op on subsequent requests the same UTC day.
+  function _pruneStaleProperties() {
+    var props = PropertiesService.getScriptProperties();
+    var today = Utilities.formatDate(new Date(), 'UTC', 'yyyy-MM-dd');
+    if (props.getProperty('_usage_last_date') === today) return;
+
+    var cutoff = new Date();
+    cutoff.setUTCDate(cutoff.getUTCDate() - 7);
+    var cutoffStr = Utilities.formatDate(cutoff, 'UTC', 'yyyy-MM-dd');
+
+    var all = props.getProperties();
+    Object.keys(all).forEach(function(k) {
+      var m = k.match(/^(?:_usage_[A-Za-z.]+|_log_sheet)_(\d{4}-\d{2}-\d{2})$/);
+      if (m && m[1] < cutoffStr) {
+        props.deleteProperty(k);
+      }
+    });
+    props.setProperty('_usage_last_date', today);
   }
 
   function _logRequest(action, req, result) {
