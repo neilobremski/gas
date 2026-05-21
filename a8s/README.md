@@ -1,6 +1,6 @@
 # A8S-GAS — Google Apps Script participant for A8S
 
-A GAS script that polls a Google Drive folder for A8S message envelopes, processes commands via Gmail/Calendar, and writes responses back. Works with any A8S server that mounts Drive via rclone.
+A GAS script that polls a Google Drive folder for A8S message envelopes, processes commands via Gmail/Calendar, and pushes notifications. Works with any A8S server using the file-proxy transport (rclone mount to Drive).
 
 ## Architecture
 
@@ -13,26 +13,51 @@ Drive folder layout:
 <root>/
   .inbox/     ← A8S writes here; GAS reads + deletes after processing
   .outbox/    ← GAS writes responses here; A8S picks up
-  .files/     ← bidirectional attachments
+  .files/     ← bidirectional attachments (A8S handles tempfile.org upload/download)
 ```
 
 ## Setup
 
 1. Create a folder in Google Drive for this agent
-2. Create subfolders: `.inbox`, `.outbox`, `.files` (or let the script create them)
-3. In Apps Script, create a new project and paste `a8s-gas.gs`
-4. Set Script Properties (Project Settings > Script properties):
+2. In Apps Script, create a new project and paste `a8s-gas.gs`
+3. Set Script Properties (Project Settings > Script properties):
 
 | Property | Value |
 |----------|-------|
 | `A8S_ROOT_FOLDER_ID` | Drive folder ID (from the URL) |
 | `A8S_PARTICIPANTS` | `{"my-email": ["gmail"], "my-calendar": ["calendar"]}` |
-| `A8S_AGENT` | Agent name for push notifications, e.g. `"claude"` |
-| `TEMPFILE_URL` | Optional. Default: `https://tempfile.org/` |
+| `A8S_AGENT` | Agent name for push notifications, e.g. `"my-agent"` |
 
-5. Run `setup()` from the editor to verify config
-6. Run `testConnection()` to confirm Drive access
-7. Run `installTrigger()` to start polling every 5 minutes
+4. Run `setup()` from the editor to verify config
+5. Run `testConnection()` to confirm Drive access
+6. Run `installTrigger()` to start polling every 5 minutes
+
+On the server side, register the file-proxy agent:
+```bash
+a8s add my-email /mnt/gdrive/my-email/ file-proxy.json
+```
+
+## Email Push (primary feature)
+
+Every trigger cycle, GAS checks for **unread** emails. For each unread message:
+1. Marks it as READ
+2. Saves any attachments to `.files/`
+3. Pushes an envelope to `.outbox/` addressed to `A8S_AGENT` containing:
+   - `thread_id` (for replying)
+   - `from`, `subject`, `date`
+   - Email body (truncated at 4KB)
+   - `FILE:` references for attachments
+
+To re-push an email: mark it as UNREAD in Gmail. Next trigger picks it up again.
+
+### Replying to an email thread
+
+```
+tell my-email "/reply <thread_id>"
+Your reply body goes here as the message content.
+```
+
+The reply goes into the same Gmail thread so conversations stay together.
 
 ## Commands
 
@@ -40,10 +65,11 @@ Drive folder layout:
 
 | Command | Description |
 |---------|-------------|
-| `/check` | Unread count + last 5 subjects |
+| `/check` | Unread count + last 5 subjects with thread IDs |
 | `/search <query>` | Gmail search, returns thread IDs + subjects |
 | `/read <thread_id>` | Full thread text |
-| `/send <to> <subject>` | Send email (body = remaining lines after command) |
+| `/send <to> <subject>` | Send new email (body = lines after command; FILE: for attachments) |
+| `/reply <thread_id>` | Reply to existing thread (body = lines after command; FILE: for attachments) |
 
 ### Calendar (participant with `["calendar"]` service)
 
@@ -53,39 +79,22 @@ Drive folder layout:
 | `/week` | Events for the next 7 days |
 | `/create <title> <datetime>` | Create a 1-hour event |
 
-## Push mode
-
-When `A8S_AGENT` is configured, the script proactively notifies about:
-- Calendar events starting within 15 minutes
-
-Push messages are written to `.outbox/` addressed to the configured agent.
-
 ## Message format
 
-Inbound (A8S writes to `.inbox/`):
-```json
-{
-  "id": "01HXYZ...",
-  "date": "2026-05-21T10:00:00.000Z",
-  "from": "claude",
-  "to": "my-email",
-  "content": "/check"
-}
-```
-
-Outbound (GAS writes to `.outbox/`):
+Push notification (new email → agent):
 ```json
 {
   "id": "01HXYZ...",
   "date": "2026-05-21T10:00:05.000Z",
-  "to": "claude",
-  "content": "3 unread\nSubject 1 (from: alice@example.com)\n..."
+  "to": "my-agent",
+  "content": "New email\nthread_id: 18a3b...\nfrom: alice@example.com\nsubject: Hello\ndate: 2026-05-21T10:00:00Z\n---\nEmail body here...",
+  "files": [{"filename": "report.pdf", "path": "./.files/report.pdf"}]
 }
 ```
 
 ## Admin functions
 
-Run these from the Apps Script editor:
+Run from the Apps Script editor:
 
 - `setup()` — verify configuration
 - `testConnection()` — confirm Drive folder access
@@ -96,5 +105,6 @@ Run these from the Apps Script editor:
 
 - Single .gs file, V8 runtime, no external dependencies
 - 6-minute execution limit per trigger invocation
-- No persistent state between invocations (uses Script Properties for push dedup)
-- Drive operations via `DriveApp`, email via `GmailApp`, calendar via `CalendarApp`
+- No persistent state between invocations (Script Properties for dedup)
+- File transfer: GAS writes to `.files/`, A8S file-proxy handles tempfile.org for cross-cluster delivery
+- Drive operations don't count against UrlFetch quota

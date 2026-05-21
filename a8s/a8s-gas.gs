@@ -20,8 +20,7 @@ var A8S = (function() {
     return {
       rootFolderId: props.getProperty('A8S_ROOT_FOLDER_ID'),
       participants: JSON.parse(props.getProperty('A8S_PARTICIPANTS') || '{}'),
-      agent: props.getProperty('A8S_AGENT') || '',
-      tempfileUrl: props.getProperty('TEMPFILE_URL') || 'https://tempfile.org/'
+      agent: props.getProperty('A8S_AGENT') || ''
     };
   }
 
@@ -39,19 +38,18 @@ var A8S = (function() {
       content: content
     };
     if (files && files.length) envelope.files = files;
-    var filename = envelope.id + '.json';
-    outbox.createFile(filename, JSON.stringify(envelope, null, 2), 'application/json');
+    outbox.createFile(envelope.id + '.json', JSON.stringify(envelope, null, 2), 'application/json');
     return envelope;
   }
 
-  // --- Participant Handlers ---
+  // --- Gmail Handler ---
 
-  function handleGmail(command, args, body) {
+  function handleGmail(command, args, body, envelope, filesFolder, outbox, config) {
     if (command === '/check') {
       var threads = GmailApp.search('is:unread', 0, 5);
       var subjects = threads.map(function(t) {
         var msg = t.getMessages()[t.getMessageCount() - 1];
-        return msg.getSubject() + ' (from: ' + msg.getFrom() + ')';
+        return t.getId() + ' | ' + msg.getSubject() + ' | ' + msg.getFrom();
       });
       var total = GmailApp.getInboxUnreadCount();
       return total + ' unread\n' + subjects.join('\n');
@@ -78,24 +76,105 @@ var A8S = (function() {
         var parts = messages.map(function(m) {
           return '--- ' + m.getFrom() + ' (' + m.getDate().toISOString() + ') ---\n' + m.getPlainBody();
         });
-        return parts.join('\n\n');
+        return 'thread_id: ' + threadId + '\n\n' + parts.join('\n\n');
       } catch (e) {
         return 'error: ' + e.message;
       }
     }
 
-    if (command === '/send') {
+    if (command === '/send' || command === '/reply') {
+      if (command === '/reply') {
+        var replyThreadId = args[0];
+        if (!replyThreadId) return 'error: /reply requires a thread_id';
+        try {
+          var replyThread = GmailApp.getThreadById(replyThreadId);
+          var lastMsg = replyThread.getMessages()[replyThread.getMessageCount() - 1];
+          var attachments = collectFileAttachments(envelope, filesFolder);
+          var opts = {};
+          if (attachments.length) opts.attachments = attachments;
+          lastMsg.reply(body || '', opts);
+          return 'replied to thread ' + replyThreadId;
+        } catch (e) {
+          return 'error: ' + e.message;
+        }
+      }
+
       if (args.length < 2) return 'error: /send <to> <subject>';
       var to = args[0];
       var subject = args.slice(1).join(' ');
-      var emailBody = body || '';
+      var attachments = collectFileAttachments(envelope, filesFolder);
       var opts = {};
-      GmailApp.sendEmail(to, subject, emailBody, opts);
+      if (attachments.length) opts.attachments = attachments;
+      GmailApp.sendEmail(to, subject, body || '', opts);
       return 'sent to ' + to + ': ' + subject;
     }
 
-    return 'error: unknown gmail command: ' + command + '\navailable: /check, /search <query>, /read <id>, /send <to> <subject>';
+    return 'unknown: ' + command + '\navailable: /check, /search, /read, /send, /reply';
   }
+
+  function collectFileAttachments(envelope, filesFolder) {
+    var attachments = [];
+    if (!envelope.files || !envelope.files.length) return attachments;
+    envelope.files.forEach(function(f) {
+      var filename = f.filename || f.path.split('/').pop();
+      var iter = filesFolder.getFilesByName(filename);
+      if (iter.hasNext()) {
+        attachments.push(iter.next().getBlob());
+      }
+    });
+    return attachments;
+  }
+
+  // --- Email Push (UNREAD → mark READ → tell agent) ---
+
+  function pushNewEmails(config, outbox, filesFolder) {
+    if (!config.agent) return;
+
+    var threads = GmailApp.search('is:unread', 0, 10);
+    if (!threads.length) return;
+
+    threads.forEach(function(thread) {
+      var messages = thread.getMessages();
+      var unread = messages.filter(function(m) { return m.isUnread(); });
+
+      unread.forEach(function(msg) {
+        var content = formatEmailForAgent(msg, thread.getId());
+        var files = saveAttachmentsToFiles(msg, filesFolder);
+        writeEnvelope(outbox, config.agent, content, files);
+        msg.markRead();
+      });
+    });
+  }
+
+  function formatEmailForAgent(msg, threadId) {
+    var from = msg.getFrom();
+    var subject = msg.getSubject();
+    var date = msg.getDate().toISOString();
+    var body = msg.getPlainBody();
+    if (body.length > 4000) body = body.substring(0, 4000) + '\n[truncated]';
+
+    return 'New email\n' +
+      'thread_id: ' + threadId + '\n' +
+      'from: ' + from + '\n' +
+      'subject: ' + subject + '\n' +
+      'date: ' + date + '\n' +
+      '---\n' + body;
+  }
+
+  function saveAttachmentsToFiles(msg, filesFolder) {
+    var attachments = msg.getAttachments();
+    if (!attachments.length) return [];
+
+    var fileRefs = [];
+    attachments.forEach(function(att) {
+      var filename = att.getName();
+      var file = filesFolder.createFile(att.copyBlob().setName(filename));
+      fileRefs.push({ filename: filename, path: './.files/' + filename });
+    });
+    return fileRefs;
+  }
+
+  // --- Calendar Handler ---
 
   function handleCalendar(command, args) {
     var cal = CalendarApp.getDefaultCalendar();
@@ -105,14 +184,11 @@ var A8S = (function() {
       var end = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59);
       var events = cal.getEvents(now, end);
       if (!events.length) return 'no events today';
-      var lines = events.map(function(ev) {
+      return events.map(function(ev) {
         var start = ev.getStartTime();
-        var h = start.getHours();
-        var m = start.getMinutes();
-        var time = (h < 10 ? '0' : '') + h + ':' + (m < 10 ? '0' : '') + m;
+        var time = pad(start.getHours()) + ':' + pad(start.getMinutes());
         return time + ' ' + ev.getTitle();
-      });
-      return lines.join('\n');
+      }).join('\n');
     }
 
     if (command === '/week') {
@@ -120,15 +196,12 @@ var A8S = (function() {
       var end = new Date(now.getTime() + 7 * 86400000);
       var events = cal.getEvents(now, end);
       if (!events.length) return 'no events this week';
-      var lines = events.map(function(ev) {
+      return events.map(function(ev) {
         var start = ev.getStartTime();
         var dateStr = (start.getMonth() + 1) + '/' + start.getDate();
-        var h = start.getHours();
-        var m = start.getMinutes();
-        var time = (h < 10 ? '0' : '') + h + ':' + (m < 10 ? '0' : '') + m;
+        var time = pad(start.getHours()) + ':' + pad(start.getMinutes());
         return dateStr + ' ' + time + ' ' + ev.getTitle();
-      });
-      return lines.join('\n');
+      }).join('\n');
     }
 
     if (command === '/create') {
@@ -138,16 +211,17 @@ var A8S = (function() {
       try {
         var start = new Date(dateStr);
         if (isNaN(start.getTime())) return 'error: invalid datetime: ' + dateStr;
-        var eventEnd = new Date(start.getTime() + 3600000);
-        var ev = cal.createEvent(title, start, eventEnd);
-        return 'created: ' + ev.getTitle() + ' at ' + start.toISOString();
+        cal.createEvent(title, start, new Date(start.getTime() + 3600000));
+        return 'created: ' + title + ' at ' + start.toISOString();
       } catch (e) {
         return 'error: ' + e.message;
       }
     }
 
-    return 'error: unknown calendar command: ' + command + '\navailable: /today, /week, /create <title> <datetime>';
+    return 'unknown: ' + command + '\navailable: /today, /week, /create';
   }
+
+  function pad(n) { return (n < 10 ? '0' : '') + n; }
 
   // --- Command Routing ---
 
@@ -156,107 +230,29 @@ var A8S = (function() {
     var firstLine = lines[0].trim();
     if (!firstLine.startsWith('/')) return null;
     var parts = firstLine.split(/\s+/);
-    var command = parts[0];
-    var args = parts.slice(1);
-    var body = lines.slice(1).join('\n').trim();
-    return { command: command, args: args, body: body };
+    return { command: parts[0], args: parts.slice(1), body: lines.slice(1).join('\n').trim() };
   }
 
-  function routeMessage(envelope, config) {
+  function routeMessage(envelope, config, filesFolder, outbox) {
     var to = envelope.to;
-    var participantServices = null;
-
-    for (var name in config.participants) {
-      if (name === to) {
-        participantServices = config.participants[name];
-        break;
-      }
-    }
+    var participantServices = config.participants[to];
 
     if (!participantServices) {
       return 'error: unknown participant "' + to + '". configured: ' + Object.keys(config.participants).join(', ');
     }
 
     var parsed = parseCommand(envelope.content || '');
-    if (!parsed) {
-      return 'error: message must start with a /command';
-    }
+    if (!parsed) return 'error: message must start with a /command';
 
     var service = participantServices[0];
     if (service === 'gmail') {
-      return handleGmail(parsed.command, parsed.args, parsed.body);
-    } else if (service === 'calendar') {
+      return handleGmail(parsed.command, parsed.args, parsed.body, envelope, filesFolder, outbox, config);
+    }
+    if (service === 'calendar') {
       return handleCalendar(parsed.command, parsed.args);
     }
 
     return 'error: no handler for service "' + service + '"';
-  }
-
-  // --- Push Mode ---
-
-  function checkUpcomingEvents(config, outbox) {
-    if (!config.agent) return;
-    var cal = CalendarApp.getDefaultCalendar();
-    var now = new Date();
-    var soon = new Date(now.getTime() + 15 * 60000);
-    var events = cal.getEvents(now, soon);
-    if (!events.length) return;
-
-    var props = PropertiesService.getScriptProperties();
-    var notifiedKey = '_a8s_notified_events';
-    var notified = JSON.parse(props.getProperty(notifiedKey) || '{}');
-
-    var newEvents = [];
-    events.forEach(function(ev) {
-      var id = ev.getId();
-      if (!notified[id]) {
-        var start = ev.getStartTime();
-        var h = start.getHours();
-        var m = start.getMinutes();
-        var time = (h < 10 ? '0' : '') + h + ':' + (m < 10 ? '0' : '') + m;
-        newEvents.push(time + ' ' + ev.getTitle());
-        notified[id] = now.toISOString();
-      }
-    });
-
-    if (newEvents.length) {
-      writeEnvelope(outbox, config.agent, 'upcoming in 15min:\n' + newEvents.join('\n'));
-    }
-
-    var cutoff = now.getTime() - 3600000;
-    for (var id in notified) {
-      if (new Date(notified[id]).getTime() < cutoff) delete notified[id];
-    }
-    props.setProperty(notifiedKey, JSON.stringify(notified));
-  }
-
-  // --- Tempfile Support ---
-
-  function downloadTempfile(url, filesFolder, config) {
-    var downloadUrl = url.replace(/\/?$/, '/') + 'download';
-    var resp = UrlFetchApp.fetch(downloadUrl, { muteHttpExceptions: true });
-    if (resp.getResponseCode() !== 200) return null;
-    var blob = resp.getBlob();
-    var filename = url.split('/').filter(function(s) { return s; }).pop() || 'file';
-    blob.setName(filename);
-    return filesFolder.createFile(blob);
-  }
-
-  function uploadTempfile(file, config) {
-    var baseUrl = config.tempfileUrl.replace(/\/?$/, '/');
-    var blob = file.getBlob();
-    var resp = UrlFetchApp.fetch(baseUrl + 'api/upload/local', {
-      method: 'post',
-      payload: { file: blob },
-      muteHttpExceptions: true
-    });
-    if (resp.getResponseCode() !== 200) return null;
-    try {
-      var data = JSON.parse(resp.getContentText());
-      return data.url || null;
-    } catch (e) {
-      return resp.getContentText().trim();
-    }
   }
 
   // --- Main Trigger ---
@@ -278,7 +274,7 @@ var A8S = (function() {
 
     var inbox = getOrCreateSubfolder(root, '.inbox');
     var outbox = getOrCreateSubfolder(root, '.outbox');
-    getOrCreateSubfolder(root, '.files');
+    var filesFolder = getOrCreateSubfolder(root, '.files');
 
     var files = inbox.getFiles();
     while (files.hasNext()) {
@@ -287,47 +283,42 @@ var A8S = (function() {
 
       try {
         var envelope = JSON.parse(file.getBlob().getDataAsString());
-        var response = routeMessage(envelope, config);
+        var response = routeMessage(envelope, config, filesFolder, outbox);
         writeEnvelope(outbox, envelope.from || config.agent, response);
       } catch (e) {
         console.log('error processing ' + file.getName() + ': ' + e.message);
-        try {
-          writeEnvelope(outbox, config.agent, 'error processing message ' + file.getName() + ': ' + e.message);
-        } catch (e2) {
-          console.log('failed to write error envelope: ' + e2.message);
-        }
       }
 
       file.setTrashed(true);
     }
 
     try {
-      checkUpcomingEvents(config, outbox);
+      pushNewEmails(config, outbox, filesFolder);
     } catch (e) {
-      console.log('push check failed: ' + e.message);
+      console.log('email push failed: ' + e.message);
     }
   }
 
-  // --- Setup Functions ---
+  // --- Setup ---
 
   function setup() {
     var props = PropertiesService.getScriptProperties();
     if (!props.getProperty('A8S_ROOT_FOLDER_ID')) {
-      Logger.log('Set A8S_ROOT_FOLDER_ID in Script Properties to the Drive folder ID.');
-      Logger.log('Set A8S_PARTICIPANTS to a JSON map, e.g.: {"my-email": ["gmail"], "my-calendar": ["calendar"]}');
-      Logger.log('Set A8S_AGENT to the agent name for push notifications (e.g. "claude")');
+      Logger.log('Set Script Properties:');
+      Logger.log('  A8S_ROOT_FOLDER_ID — Drive folder ID');
+      Logger.log('  A8S_PARTICIPANTS — e.g. {"my-email": ["gmail"], "my-calendar": ["calendar"]}');
+      Logger.log('  A8S_AGENT — agent to push notifications to');
       return;
     }
-    Logger.log('Configuration OK. Run installTrigger() to activate polling.');
+    Logger.log('Configuration OK. Run installTrigger() to activate.');
   }
 
   function installTrigger() {
-    var existing = ScriptApp.getProjectTriggers();
-    existing.forEach(function(t) {
+    ScriptApp.getProjectTriggers().forEach(function(t) {
       if (t.getHandlerFunction() === 'onTrigger') ScriptApp.deleteTrigger(t);
     });
     ScriptApp.newTrigger('onTrigger').timeBased().everyMinutes(5).create();
-    Logger.log('Trigger installed: onTrigger every 5 minutes.');
+    Logger.log('Trigger installed: every 5 minutes.');
   }
 
   function removeTrigger() {
@@ -343,22 +334,16 @@ var A8S = (function() {
 
   function testConnection() {
     var config = getConfig();
-    if (!config.rootFolderId) {
-      Logger.log('ERROR: A8S_ROOT_FOLDER_ID not set');
-      return;
-    }
+    if (!config.rootFolderId) { Logger.log('ERROR: A8S_ROOT_FOLDER_ID not set'); return; }
     try {
       var root = DriveApp.getFolderById(config.rootFolderId);
-      Logger.log('Root folder: ' + root.getName() + ' (' + root.getId() + ')');
-      var inbox = getOrCreateSubfolder(root, '.inbox');
-      var outbox = getOrCreateSubfolder(root, '.outbox');
-      var filesDir = getOrCreateSubfolder(root, '.files');
-      Logger.log('.inbox: ' + inbox.getId());
-      Logger.log('.outbox: ' + outbox.getId());
-      Logger.log('.files: ' + filesDir.getId());
+      Logger.log('Root: ' + root.getName() + ' (' + root.getId() + ')');
+      Logger.log('.inbox: ' + getOrCreateSubfolder(root, '.inbox').getId());
+      Logger.log('.outbox: ' + getOrCreateSubfolder(root, '.outbox').getId());
+      Logger.log('.files: ' + getOrCreateSubfolder(root, '.files').getId());
       Logger.log('Participants: ' + JSON.stringify(config.participants));
       Logger.log('Agent: ' + (config.agent || '(not set)'));
-      Logger.log('Connection OK.');
+      Logger.log('OK');
     } catch (e) {
       Logger.log('ERROR: ' + e.message);
     }
