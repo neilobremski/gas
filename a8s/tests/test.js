@@ -21,6 +21,15 @@ function assertEqual(actual, expected, msg) {
   }
 }
 
+function assertDeepEqual(actual, expected, msg) {
+  if (JSON.stringify(actual) === JSON.stringify(expected)) {
+    passed++;
+  } else {
+    failed++;
+    console.error(`FAIL: ${msg}\n  expected: ${JSON.stringify(expected)}\n  actual:   ${JSON.stringify(actual)}`);
+  }
+}
+
 // --- Inline pure functions from Code.js for testing ---
 
 const CROCKFORD = '0123456789ABCDEFGHJKMNPQRSTVWXYZ';
@@ -57,7 +66,20 @@ function formatEmailForAgent(msg, threadId) {
 
 const pad = n => (n < 10 ? '0' : '') + n;
 
-function formatEventForAgent(ev) {
+const DRIVE_URL_PATTERN = /https:\/\/(?:drive\.google\.com\/file\/d\/|docs\.google\.com\/(?:document|spreadsheets|presentation)\/d\/)([a-zA-Z0-9_-]+)/g;
+
+function extractDriveLinks(text) {
+  if (!text) return [];
+  const ids = [];
+  let match;
+  const re = new RegExp(DRIVE_URL_PATTERN.source, 'g');
+  while ((match = re.exec(text)) !== null) {
+    if (!ids.includes(match[1])) ids.push(match[1]);
+  }
+  return ids;
+}
+
+function formatEventForAgent(ev, filesFolder) {
   const start = ev.getStartTime();
   const end = ev.getEndTime();
   const lines = [
@@ -83,7 +105,27 @@ function formatEventForAgent(ev) {
   lines.push('---');
   if (description) lines.push(description);
 
-  return lines.join('\n');
+  const content = lines.join('\n');
+  const files = [];
+
+  if (filesFolder && description) {
+    const fileIds = extractDriveLinks(description);
+    fileIds.forEach(id => {
+      try {
+        files.push(mockDownloadDriveFile(id, filesFolder));
+      } catch (e) {
+        // skip
+      }
+    });
+  }
+
+  return { content, files };
+}
+
+function mockDownloadDriveFile(fileId, filesFolder) {
+  const filename = `file_${fileId}.md`;
+  filesFolder.createFile(filename, 'mock content', 'text/markdown');
+  return { filename, path: `./.files/${filename}` };
 }
 
 function writeEnvelope(outbox, to, content, files) {
@@ -162,9 +204,20 @@ function createMockOutbox() {
 }
 
 function createMockFilesFolder() {
+  const created = [];
   return {
-    getFilesByName: () => ({ hasNext: () => false }),
-    createFile: (blob) => blob
+    getFilesByName: (name) => {
+      const found = created.find(f => f.name === name);
+      return { hasNext: () => !!found, next: () => found };
+    },
+    createFile: (nameOrBlob, content, mimeType) => {
+      const entry = typeof nameOrBlob === 'string'
+        ? { name: nameOrBlob, content, mimeType }
+        : { name: nameOrBlob.name || 'blob', content: null, mimeType: null };
+      created.push(entry);
+      return entry;
+    },
+    _created: created
   };
 }
 
@@ -425,6 +478,60 @@ function handleCalendar(command, args) {
   assertEqual(pad(23), '23', 'pad: larger double digit');
 })();
 
+// --- extractDriveLinks() ---
+
+(() => {
+  const ids = extractDriveLinks('Check this doc: https://docs.google.com/document/d/1abc_DEF-123/edit');
+  assertDeepEqual(ids, ['1abc_DEF-123'], 'extractDriveLinks: Google Doc URL');
+})();
+
+(() => {
+  const ids = extractDriveLinks('https://drive.google.com/file/d/0BxHZ7abc123/view?usp=sharing');
+  assertDeepEqual(ids, ['0BxHZ7abc123'], 'extractDriveLinks: Drive file URL');
+})();
+
+(() => {
+  const ids = extractDriveLinks('https://docs.google.com/spreadsheets/d/sp123ABC/edit#gid=0');
+  assertDeepEqual(ids, ['sp123ABC'], 'extractDriveLinks: Sheets URL');
+})();
+
+(() => {
+  const ids = extractDriveLinks('https://docs.google.com/presentation/d/pres_XYZ/edit');
+  assertDeepEqual(ids, ['pres_XYZ'], 'extractDriveLinks: Slides URL');
+})();
+
+(() => {
+  const text = 'Doc: https://docs.google.com/document/d/abc123/edit\nSheet: https://docs.google.com/spreadsheets/d/def456/edit';
+  const ids = extractDriveLinks(text);
+  assertDeepEqual(ids, ['abc123', 'def456'], 'extractDriveLinks: multiple URLs');
+})();
+
+(() => {
+  const text = 'https://docs.google.com/document/d/same_id/edit and https://docs.google.com/document/d/same_id/preview';
+  const ids = extractDriveLinks(text);
+  assertDeepEqual(ids, ['same_id'], 'extractDriveLinks: deduplicates same ID');
+})();
+
+(() => {
+  const ids = extractDriveLinks('no links here, just text');
+  assertDeepEqual(ids, [], 'extractDriveLinks: no links returns empty');
+})();
+
+(() => {
+  const ids = extractDriveLinks(null);
+  assertDeepEqual(ids, [], 'extractDriveLinks: null returns empty');
+})();
+
+(() => {
+  const ids = extractDriveLinks('');
+  assertDeepEqual(ids, [], 'extractDriveLinks: empty string returns empty');
+})();
+
+(() => {
+  const ids = extractDriveLinks('https://www.google.com/search?q=test');
+  assertDeepEqual(ids, [], 'extractDriveLinks: non-Drive Google URL ignored');
+})();
+
 // --- formatEventForAgent() ---
 
 (() => {
@@ -438,16 +545,17 @@ function handleCalendar(command, args) {
     recurring: true,
     guests: ['alice@example.com', 'bob@example.com']
   });
-  const result = formatEventForAgent(ev);
-  assert(result.startsWith('Calendar event starting soon'), 'formatEvent: starts with header');
-  assert(result.includes('event_id: evt_123'), 'formatEvent: includes event_id');
-  assert(result.includes('title: Daily Standup'), 'formatEvent: includes title');
-  assert(result.includes('start: 2026-05-22T14:30:00.000Z'), 'formatEvent: includes start ISO');
-  assert(result.includes('end: 2026-05-22T14:45:00.000Z'), 'formatEvent: includes end ISO');
-  assert(result.includes('location: Zoom https://zoom.us/j/123'), 'formatEvent: includes location');
-  assert(result.includes('recurring: yes'), 'formatEvent: includes recurring flag');
-  assert(result.includes('attendees: alice@example.com, bob@example.com'), 'formatEvent: includes attendees');
-  assert(result.includes('---\nStand up meeting notes'), 'formatEvent: includes description after separator');
+  const { content, files } = formatEventForAgent(ev, null);
+  assert(content.startsWith('Calendar event starting soon'), 'formatEvent: starts with header');
+  assert(content.includes('event_id: evt_123'), 'formatEvent: includes event_id');
+  assert(content.includes('title: Daily Standup'), 'formatEvent: includes title');
+  assert(content.includes('start: 2026-05-22T14:30:00.000Z'), 'formatEvent: includes start ISO');
+  assert(content.includes('end: 2026-05-22T14:45:00.000Z'), 'formatEvent: includes end ISO');
+  assert(content.includes('location: Zoom https://zoom.us/j/123'), 'formatEvent: includes location');
+  assert(content.includes('recurring: yes'), 'formatEvent: includes recurring flag');
+  assert(content.includes('attendees: alice@example.com, bob@example.com'), 'formatEvent: includes attendees');
+  assert(content.includes('---\nStand up meeting notes'), 'formatEvent: includes description after separator');
+  assertDeepEqual(files, [], 'formatEvent: no files when filesFolder is null');
 })();
 
 (() => {
@@ -457,11 +565,11 @@ function handleCalendar(command, args) {
     start: '2026-05-22T09:00:00.000Z',
     end: '2026-05-22T09:30:00.000Z'
   });
-  const result = formatEventForAgent(ev);
-  assert(!result.includes('location:'), 'formatEvent: omits location when empty');
-  assert(result.includes('recurring: no'), 'formatEvent: recurring no for non-recurring');
-  assert(!result.includes('attendees:'), 'formatEvent: omits attendees when none');
-  assert(result.endsWith('---'), 'formatEvent: ends with separator when no description');
+  const { content } = formatEventForAgent(ev, null);
+  assert(!content.includes('location:'), 'formatEvent: omits location when empty');
+  assert(content.includes('recurring: no'), 'formatEvent: recurring no for non-recurring');
+  assert(!content.includes('attendees:'), 'formatEvent: omits attendees when none');
+  assert(content.endsWith('---'), 'formatEvent: ends with separator when no description');
 })();
 
 (() => {
@@ -473,9 +581,67 @@ function handleCalendar(command, args) {
     description: 'Check email, review calendar, prepare daily plan',
     recurring: true
   });
-  const result = formatEventForAgent(ev);
-  assert(result.includes('recurring: yes'), 'formatEvent: recurring event for scheduling');
-  assert(result.includes('Check email, review calendar, prepare daily plan'), 'formatEvent: description carries the prompt');
+  const { content } = formatEventForAgent(ev, null);
+  assert(content.includes('recurring: yes'), 'formatEvent: recurring event for scheduling');
+  assert(content.includes('Check email, review calendar, prepare daily plan'), 'formatEvent: description carries the prompt');
+})();
+
+// --- formatEventForAgent with Drive links ---
+
+(() => {
+  const ev = createMockEvent({
+    id: 'evt_drive',
+    title: 'Review Meeting',
+    start: '2026-05-22T10:00:00.000Z',
+    end: '2026-05-22T11:00:00.000Z',
+    description: 'Agenda: https://docs.google.com/document/d/doc_abc123/edit\nSlides: https://docs.google.com/presentation/d/pres_xyz/edit'
+  });
+  const filesFolder = createMockFilesFolder();
+  const { content, files } = formatEventForAgent(ev, filesFolder);
+  assertEqual(files.length, 2, 'formatEvent+drive: downloads 2 files');
+  assertEqual(files[0].filename, 'file_doc_abc123.md', 'formatEvent+drive: first file named correctly');
+  assertEqual(files[1].filename, 'file_pres_xyz.md', 'formatEvent+drive: second file named correctly');
+  assert(content.includes('https://docs.google.com/document/d/doc_abc123/edit'), 'formatEvent+drive: content still has URLs');
+})();
+
+(() => {
+  const ev = createMockEvent({
+    id: 'evt_no_drive',
+    title: 'Lunch',
+    start: '2026-05-22T12:00:00.000Z',
+    end: '2026-05-22T13:00:00.000Z',
+    description: 'Meet at the cafeteria'
+  });
+  const filesFolder = createMockFilesFolder();
+  const { files } = formatEventForAgent(ev, filesFolder);
+  assertDeepEqual(files, [], 'formatEvent+drive: no drive links means no files');
+})();
+
+// --- Trigger interval config ---
+
+(() => {
+  const valid = [1, 5, 10, 15, 30];
+  assert(valid.includes(1), 'triggerConfig: 1 is valid');
+  assert(valid.includes(5), 'triggerConfig: 5 is valid');
+  assert(valid.includes(10), 'triggerConfig: 10 is valid');
+  assert(valid.includes(15), 'triggerConfig: 15 is valid');
+  assert(valid.includes(30), 'triggerConfig: 30 is valid');
+  assert(!valid.includes(2), 'triggerConfig: 2 is not valid');
+  assert(!valid.includes(7), 'triggerConfig: 7 is not valid');
+  assert(!valid.includes(60), 'triggerConfig: 60 is not valid');
+
+  // Simulate getConfig logic
+  const parseInterval = (raw) => {
+    const n = parseInt(raw || '5', 10);
+    return valid.includes(n) ? n : 5;
+  };
+  assertEqual(parseInterval('1'), 1, 'triggerConfig: parses 1');
+  assertEqual(parseInterval('5'), 5, 'triggerConfig: parses 5');
+  assertEqual(parseInterval('30'), 30, 'triggerConfig: parses 30');
+  assertEqual(parseInterval(''), 5, 'triggerConfig: empty defaults to 5');
+  assertEqual(parseInterval(null), 5, 'triggerConfig: null defaults to 5');
+  assertEqual(parseInterval('3'), 5, 'triggerConfig: invalid falls back to 5');
+  assertEqual(parseInterval('abc'), 5, 'triggerConfig: NaN falls back to 5');
 })();
 
 // --- Report ---

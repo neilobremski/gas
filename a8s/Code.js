@@ -18,10 +18,14 @@ const A8S = (() => {
   function getConfig() {
     const props = PropertiesService.getScriptProperties();
     const caps = (props.getProperty('CAPABILITIES') || '').split(',').map(s => s.trim()).filter(Boolean);
+    const raw = parseInt(props.getProperty('TRIGGER_MINUTES') || '5', 10);
+    const valid = [1, 5, 10, 15, 30];
+    const triggerMinutes = valid.includes(raw) ? raw : 5;
     return {
       rootFolderId: props.getProperty('A8S_ROOT_FOLDER_ID'),
       participant: props.getProperty('A8S_PARTICIPANT') || '',
-      capabilities: caps
+      capabilities: caps,
+      triggerMinutes
     };
   }
 
@@ -41,6 +45,66 @@ const A8S = (() => {
     if (files && files.length) envelope.files = files;
     outbox.createFile(`${envelope.id}.json`, JSON.stringify(envelope, null, 2), 'application/json');
     return envelope;
+  }
+
+  // --- Drive File Helpers ---
+
+  const DRIVE_URL_PATTERN = /https:\/\/(?:drive\.google\.com\/file\/d\/|docs\.google\.com\/(?:document|spreadsheets|presentation)\/d\/)([a-zA-Z0-9_-]+)/g;
+
+  function extractDriveLinks(text) {
+    if (!text) return [];
+    const ids = [];
+    let match;
+    const re = new RegExp(DRIVE_URL_PATTERN.source, 'g');
+    while ((match = re.exec(text)) !== null) {
+      if (!ids.includes(match[1])) ids.push(match[1]);
+    }
+    return ids;
+  }
+
+  function downloadDriveFile(fileId, filesFolder) {
+    const file = DriveApp.getFileById(fileId);
+    const mimeType = file.getMimeType();
+    const name = file.getName();
+
+    if (mimeType === 'application/vnd.google-apps.document') {
+      let content;
+      try {
+        content = exportDocAsMarkdown(fileId);
+      } catch (e) {
+        content = file.getAs('text/plain').getDataAsString();
+      }
+      const filename = name + '.md';
+      const iter = filesFolder.getFilesByName(filename);
+      if (iter.hasNext()) return { filename, path: `./.files/${filename}` };
+      filesFolder.createFile(filename, content, 'text/markdown');
+      return { filename, path: `./.files/${filename}` };
+    }
+
+    const filename = name;
+    const iter = filesFolder.getFilesByName(filename);
+    if (iter.hasNext()) return { filename, path: `./.files/${filename}` };
+    const blob = file.getBlob();
+    filesFolder.createFile(blob.setName(filename));
+    return { filename, path: `./.files/${filename}` };
+  }
+
+  function exportDocAsMarkdown(fileId) {
+    const token = ScriptApp.getOAuthToken();
+    const url = `https://www.googleapis.com/drive/v3/files/${fileId}/export?mimeType=text/markdown`;
+    const resp = UrlFetchApp.fetch(url, {
+      headers: { Authorization: `Bearer ${token}` },
+      muteHttpExceptions: true
+    });
+    if (resp.getResponseCode() !== 200) {
+      const plainUrl = `https://www.googleapis.com/drive/v3/files/${fileId}/export?mimeType=text/plain`;
+      const plainResp = UrlFetchApp.fetch(plainUrl, {
+        headers: { Authorization: `Bearer ${token}` },
+        muteHttpExceptions: true
+      });
+      return plainResp.getContentText();
+    }
+    return resp.getContentText();
   }
 
   // --- Gmail Handler ---
@@ -170,7 +234,7 @@ const A8S = (() => {
 
   // --- Calendar Push (upcoming events → tell participant) ---
 
-  function formatEventForAgent(ev) {
+  function formatEventForAgent(ev, filesFolder) {
     const start = ev.getStartTime();
     const end = ev.getEndTime();
     const lines = [
@@ -196,10 +260,24 @@ const A8S = (() => {
     lines.push('---');
     if (description) lines.push(description);
 
-    return lines.join('\n');
+    const content = lines.join('\n');
+    const files = [];
+
+    if (filesFolder && description) {
+      const fileIds = extractDriveLinks(description);
+      fileIds.forEach(id => {
+        try {
+          files.push(downloadDriveFile(id, filesFolder));
+        } catch (e) {
+          console.log(`drive download failed for ${id}: ${e.message}`);
+        }
+      });
+    }
+
+    return { content, files };
   }
 
-  function pushUpcomingEvents(config, outbox) {
+  function pushUpcomingEvents(config, outbox, filesFolder) {
     if (!config.participant || !config.capabilities.includes('calendar')) return;
 
     const cal = CalendarApp.getDefaultCalendar();
@@ -216,8 +294,8 @@ const A8S = (() => {
       const start = ev.getStartTime();
       const key = `${ev.getId()}@${start.getTime()}`;
       if (!notified[key]) {
-        const content = formatEventForAgent(ev);
-        writeEnvelope(outbox, config.participant, content);
+        const { content, files } = formatEventForAgent(ev, filesFolder);
+        writeEnvelope(outbox, config.participant, content, files);
         notified[key] = now.toISOString();
       }
     });
@@ -356,7 +434,7 @@ const A8S = (() => {
     }
 
     try {
-      pushUpcomingEvents(config, outbox);
+      pushUpcomingEvents(config, outbox, filesFolder);
     } catch (e) {
       console.log(`calendar push failed: ${e.message}`);
     }
@@ -371,6 +449,7 @@ const A8S = (() => {
       Logger.log('  A8S_ROOT_FOLDER_ID — Drive folder ID');
       Logger.log('  A8S_PARTICIPANT — who to push notifications to (e.g. "my-agent")');
       Logger.log('  CAPABILITIES — comma-delimited list (e.g. "gmail,calendar")');
+      Logger.log('  TRIGGER_MINUTES — trigger interval: 1, 5, 10, 15, or 30 (default: 5)');
       return;
     }
     Logger.log('Configuration OK. Run installTrigger() to activate.');
@@ -380,8 +459,9 @@ const A8S = (() => {
     ScriptApp.getProjectTriggers().forEach(t => {
       if (t.getHandlerFunction() === 'onTrigger') ScriptApp.deleteTrigger(t);
     });
-    ScriptApp.newTrigger('onTrigger').timeBased().everyMinutes(5).create();
-    Logger.log('Trigger installed: every 5 minutes.');
+    const config = getConfig();
+    ScriptApp.newTrigger('onTrigger').timeBased().everyMinutes(config.triggerMinutes).create();
+    Logger.log(`Trigger installed: every ${config.triggerMinutes} minutes.`);
   }
 
   function removeTrigger() {
@@ -406,6 +486,7 @@ const A8S = (() => {
       Logger.log(`.files: ${getOrCreateSubfolder(root, '.files').getId()}`);
       Logger.log(`Participant: ${config.participant || '(not set)'}`);
       Logger.log(`Capabilities: ${config.capabilities.join(', ') || '(none)'}`);
+      Logger.log(`Trigger interval: ${config.triggerMinutes} minutes`);
       Logger.log('OK');
     } catch (e) {
       Logger.log(`ERROR: ${e.message}`);
@@ -418,7 +499,7 @@ const A8S = (() => {
     installTrigger,
     removeTrigger,
     testConnection,
-    _testing: { ulid, parseCommand, formatEmailForAgent, formatEventForAgent, writeEnvelope, routeMessage, pad }
+    _testing: { ulid, parseCommand, formatEmailForAgent, formatEventForAgent, writeEnvelope, routeMessage, pad, extractDriveLinks, exportDocAsMarkdown, downloadDriveFile, getConfig }
   };
 
 })();
