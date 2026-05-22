@@ -57,6 +57,35 @@ function formatEmailForAgent(msg, threadId) {
 
 const pad = n => (n < 10 ? '0' : '') + n;
 
+function formatEventForAgent(ev) {
+  const start = ev.getStartTime();
+  const end = ev.getEndTime();
+  const lines = [
+    'Calendar event starting soon',
+    `event_id: ${ev.getId()}`,
+    `title: ${ev.getTitle()}`,
+    `start: ${start.toISOString()}`,
+    `end: ${end.toISOString()}`
+  ];
+
+  const location = ev.getLocation();
+  if (location) lines.push(`location: ${location}`);
+
+  const isRecurring = ev.isRecurringEvent();
+  lines.push(`recurring: ${isRecurring ? 'yes' : 'no'}`);
+
+  const guests = ev.getGuestList();
+  if (guests.length) {
+    lines.push(`attendees: ${guests.map(g => g.getEmail()).join(', ')}`);
+  }
+
+  const description = ev.getDescription();
+  lines.push('---');
+  if (description) lines.push(description);
+
+  return lines.join('\n');
+}
+
 function writeEnvelope(outbox, to, content, files) {
   const envelope = {
     id: ulid(),
@@ -136,6 +165,19 @@ function createMockFilesFolder() {
   return {
     getFilesByName: () => ({ hasNext: () => false }),
     createFile: (blob) => blob
+  };
+}
+
+function createMockEvent({ id, title, start, end, location = '', description = '', recurring = false, guests = [] }) {
+  return {
+    getId: () => id,
+    getTitle: () => title,
+    getStartTime: () => new Date(start),
+    getEndTime: () => new Date(end),
+    getLocation: () => location,
+    getDescription: () => description,
+    isRecurringEvent: () => recurring,
+    getGuestList: () => guests.map(email => ({ getEmail: () => email }))
   };
 }
 
@@ -381,6 +423,59 @@ function handleCalendar(command, args) {
   assertEqual(pad(5), '05', 'pad: single digit');
   assertEqual(pad(10), '10', 'pad: double digit unchanged');
   assertEqual(pad(23), '23', 'pad: larger double digit');
+})();
+
+// --- formatEventForAgent() ---
+
+(() => {
+  const ev = createMockEvent({
+    id: 'evt_123',
+    title: 'Daily Standup',
+    start: '2026-05-22T14:30:00.000Z',
+    end: '2026-05-22T14:45:00.000Z',
+    location: 'Zoom https://zoom.us/j/123',
+    description: 'Stand up meeting notes',
+    recurring: true,
+    guests: ['alice@example.com', 'bob@example.com']
+  });
+  const result = formatEventForAgent(ev);
+  assert(result.startsWith('Calendar event starting soon'), 'formatEvent: starts with header');
+  assert(result.includes('event_id: evt_123'), 'formatEvent: includes event_id');
+  assert(result.includes('title: Daily Standup'), 'formatEvent: includes title');
+  assert(result.includes('start: 2026-05-22T14:30:00.000Z'), 'formatEvent: includes start ISO');
+  assert(result.includes('end: 2026-05-22T14:45:00.000Z'), 'formatEvent: includes end ISO');
+  assert(result.includes('location: Zoom https://zoom.us/j/123'), 'formatEvent: includes location');
+  assert(result.includes('recurring: yes'), 'formatEvent: includes recurring flag');
+  assert(result.includes('attendees: alice@example.com, bob@example.com'), 'formatEvent: includes attendees');
+  assert(result.includes('---\nStand up meeting notes'), 'formatEvent: includes description after separator');
+})();
+
+(() => {
+  const ev = createMockEvent({
+    id: 'evt_minimal',
+    title: 'Quick Chat',
+    start: '2026-05-22T09:00:00.000Z',
+    end: '2026-05-22T09:30:00.000Z'
+  });
+  const result = formatEventForAgent(ev);
+  assert(!result.includes('location:'), 'formatEvent: omits location when empty');
+  assert(result.includes('recurring: no'), 'formatEvent: recurring no for non-recurring');
+  assert(!result.includes('attendees:'), 'formatEvent: omits attendees when none');
+  assert(result.endsWith('---'), 'formatEvent: ends with separator when no description');
+})();
+
+(() => {
+  const ev = createMockEvent({
+    id: 'recurring_abc',
+    title: 'Morning Briefing',
+    start: '2026-05-22T07:00:00.000Z',
+    end: '2026-05-22T07:15:00.000Z',
+    description: 'Check email, review calendar, prepare daily plan',
+    recurring: true
+  });
+  const result = formatEventForAgent(ev);
+  assert(result.includes('recurring: yes'), 'formatEvent: recurring event for scheduling');
+  assert(result.includes('Check email, review calendar, prepare daily plan'), 'formatEvent: description carries the prompt');
 })();
 
 // --- Report ---

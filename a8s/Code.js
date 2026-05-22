@@ -170,6 +170,35 @@ const A8S = (() => {
 
   // --- Calendar Push (upcoming events → tell participant) ---
 
+  function formatEventForAgent(ev) {
+    const start = ev.getStartTime();
+    const end = ev.getEndTime();
+    const lines = [
+      'Calendar event starting soon',
+      `event_id: ${ev.getId()}`,
+      `title: ${ev.getTitle()}`,
+      `start: ${start.toISOString()}`,
+      `end: ${end.toISOString()}`
+    ];
+
+    const location = ev.getLocation();
+    if (location) lines.push(`location: ${location}`);
+
+    const isRecurring = ev.isRecurringEvent();
+    lines.push(`recurring: ${isRecurring ? 'yes' : 'no'}`);
+
+    const guests = ev.getGuestList();
+    if (guests.length) {
+      lines.push(`attendees: ${guests.map(g => g.getEmail()).join(', ')}`);
+    }
+
+    const description = ev.getDescription();
+    lines.push('---');
+    if (description) lines.push(description);
+
+    return lines.join('\n');
+  }
+
   function pushUpcomingEvents(config, outbox) {
     if (!config.participant || !config.capabilities.includes('calendar')) return;
 
@@ -183,19 +212,15 @@ const A8S = (() => {
     const notifiedKey = '_a8s_notified_events';
     const notified = JSON.parse(props.getProperty(notifiedKey) || '{}');
 
-    const newEvents = [];
     events.forEach(ev => {
-      const id = ev.getId();
-      if (!notified[id]) {
-        const start = ev.getStartTime();
-        newEvents.push(`${pad(start.getHours())}:${pad(start.getMinutes())} ${ev.getTitle()}`);
-        notified[id] = now.toISOString();
+      const start = ev.getStartTime();
+      const key = `${ev.getId()}@${start.getTime()}`;
+      if (!notified[key]) {
+        const content = formatEventForAgent(ev);
+        writeEnvelope(outbox, config.participant, content);
+        notified[key] = now.toISOString();
       }
     });
-
-    if (newEvents.length) {
-      writeEnvelope(outbox, config.participant, `upcoming in 15min:\n${newEvents.join('\n')}`);
-    }
 
     const cutoff = now.getTime() - 3600000;
     for (const id in notified) {
@@ -393,7 +418,7 @@ const A8S = (() => {
     installTrigger,
     removeTrigger,
     testConnection,
-    _testing: { ulid, parseCommand, formatEmailForAgent, writeEnvelope, routeMessage, pad }
+    _testing: { ulid, parseCommand, formatEmailForAgent, formatEventForAgent, writeEnvelope, routeMessage, pad }
   };
 
 })();
