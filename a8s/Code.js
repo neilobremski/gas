@@ -17,10 +17,11 @@ const A8S = (() => {
 
   function getConfig() {
     const props = PropertiesService.getScriptProperties();
+    const caps = (props.getProperty('CAPABILITIES') || '').split(',').map(s => s.trim()).filter(Boolean);
     return {
       rootFolderId: props.getProperty('A8S_ROOT_FOLDER_ID'),
-      participants: JSON.parse(props.getProperty('A8S_PARTICIPANTS') || '{}'),
-      agent: props.getProperty('A8S_AGENT') || ''
+      participant: props.getProperty('A8S_PARTICIPANT') || '',
+      capabilities: caps
     };
   }
 
@@ -128,7 +129,7 @@ const A8S = (() => {
   // --- Email Push (UNREAD → mark READ → tell agent) ---
 
   function pushNewEmails(config, outbox, filesFolder) {
-    if (!config.agent) return;
+    if (!config.participant || !config.capabilities.includes('gmail')) return;
 
     const threads = GmailApp.search('is:unread', 0, 10);
     if (!threads.length) return;
@@ -140,7 +141,7 @@ const A8S = (() => {
       unread.forEach(msg => {
         const content = formatEmailForAgent(msg, thread.getId());
         const files = saveAttachmentsToFiles(msg, filesFolder);
-        writeEnvelope(outbox, config.agent, content, files);
+        writeEnvelope(outbox, config.participant, content, files);
         msg.markRead();
       });
     });
@@ -224,26 +225,26 @@ const A8S = (() => {
     return { command: parts[0], args: parts.slice(1), body: lines.slice(1).join('\n').trim() };
   }
 
+  const GMAIL_COMMANDS = ['/check', '/search', '/read', '/send', '/reply'];
+  const CALENDAR_COMMANDS = ['/today', '/week', '/create'];
+
   function routeMessage(envelope, config, filesFolder, outbox) {
-    const { to } = envelope;
-    const participantServices = config.participants[to];
-
-    if (!participantServices) {
-      return `error: unknown participant "${to}". configured: ${Object.keys(config.participants).join(', ')}`;
-    }
-
     const parsed = parseCommand(envelope.content || '');
     if (!parsed) return 'error: message must start with a /command';
 
-    const service = participantServices[0];
-    if (service === 'gmail') {
+    const { command } = parsed;
+
+    if (GMAIL_COMMANDS.includes(command)) {
+      if (!config.capabilities.includes('gmail')) return `error: gmail capability not enabled`;
       return handleGmail(parsed.command, parsed.args, parsed.body, envelope, filesFolder, outbox, config);
     }
-    if (service === 'calendar') {
+
+    if (CALENDAR_COMMANDS.includes(command)) {
+      if (!config.capabilities.includes('calendar')) return `error: calendar capability not enabled`;
       return handleCalendar(parsed.command, parsed.args);
     }
 
-    return `error: no handler for service "${service}"`;
+    return `error: unknown command "${command}"\navailable: ${GMAIL_COMMANDS.concat(CALENDAR_COMMANDS).join(', ')}`;
   }
 
   // --- Main Trigger ---
@@ -274,8 +275,12 @@ const A8S = (() => {
 
       try {
         const envelope = JSON.parse(file.getBlob().getDataAsString());
-        const response = routeMessage(envelope, config, filesFolder, outbox);
-        writeEnvelope(outbox, envelope.from || config.agent, response);
+        if (config.participant && envelope.from !== config.participant) {
+          console.log(`rejected message from "${envelope.from}" (authorized: ${config.participant})`);
+        } else {
+          const response = routeMessage(envelope, config, filesFolder, outbox);
+          writeEnvelope(outbox, config.participant, response);
+        }
       } catch (e) {
         console.log(`error processing ${file.getName()}: ${e.message}`);
       }
@@ -297,8 +302,8 @@ const A8S = (() => {
     if (!props.getProperty('A8S_ROOT_FOLDER_ID')) {
       Logger.log('Set Script Properties:');
       Logger.log('  A8S_ROOT_FOLDER_ID — Drive folder ID');
-      Logger.log('  A8S_PARTICIPANTS — e.g. {"my-email": ["gmail"], "my-calendar": ["calendar"]}');
-      Logger.log('  A8S_AGENT — agent to push notifications to');
+      Logger.log('  A8S_PARTICIPANT — who to push notifications to (e.g. "my-agent")');
+      Logger.log('  CAPABILITIES — comma-delimited list (e.g. "gmail,calendar")');
       return;
     }
     Logger.log('Configuration OK. Run installTrigger() to activate.');
@@ -332,8 +337,8 @@ const A8S = (() => {
       Logger.log(`.inbox: ${getOrCreateSubfolder(root, '.inbox').getId()}`);
       Logger.log(`.outbox: ${getOrCreateSubfolder(root, '.outbox').getId()}`);
       Logger.log(`.files: ${getOrCreateSubfolder(root, '.files').getId()}`);
-      Logger.log(`Participants: ${JSON.stringify(config.participants)}`);
-      Logger.log(`Agent: ${config.agent || '(not set)'}`);
+      Logger.log(`Participant: ${config.participant || '(not set)'}`);
+      Logger.log(`Capabilities: ${config.capabilities.join(', ') || '(none)'}`);
       Logger.log('OK');
     } catch (e) {
       Logger.log(`ERROR: ${e.message}`);

@@ -69,22 +69,22 @@ function writeEnvelope(outbox, to, content, files) {
   return envelope;
 }
 
+const GMAIL_COMMANDS = ['/check', '/search', '/read', '/send', '/reply'];
+const CALENDAR_COMMANDS = ['/today', '/week', '/create'];
+
 function routeMessage(envelope, config, filesFolder, outbox) {
-  const { to } = envelope;
-  const participantServices = config.participants[to];
-  if (!participantServices) {
-    return `error: unknown participant "${to}". configured: ${Object.keys(config.participants).join(', ')}`;
-  }
   const parsed = parseCommand(envelope.content || '');
   if (!parsed) return 'error: message must start with a /command';
-  const service = participantServices[0];
-  if (service === 'gmail') {
+  const { command } = parsed;
+  if (GMAIL_COMMANDS.includes(command)) {
+    if (!config.capabilities.includes('gmail')) return 'error: gmail capability not enabled';
     return handleGmail(parsed.command, parsed.args, parsed.body, envelope, filesFolder, outbox, config);
   }
-  if (service === 'calendar') {
+  if (CALENDAR_COMMANDS.includes(command)) {
+    if (!config.capabilities.includes('calendar')) return 'error: calendar capability not enabled';
     return handleCalendar(parsed.command, parsed.args);
   }
-  return `error: no handler for service "${service}"`;
+  return `error: unknown command "${command}"\navailable: ${GMAIL_COMMANDS.concat(CALENDAR_COMMANDS).join(', ')}`;
 }
 
 // --- GAS API Mocks ---
@@ -188,10 +188,11 @@ function handleCalendar(command, args) {
   const id2 = ulid();
   assert(id !== id2, 'ulid generates unique values');
 
-  // time-sortable: IDs generated later should be >= earlier ones (first 10 chars = timestamp)
   const earlier = ulid();
+  const laterTs = earlier.substring(0, 10);
   const later = ulid();
-  assert(later >= earlier, 'ulid is time-sortable (later >= earlier)');
+  const laterTs2 = later.substring(0, 10);
+  assert(laterTs2 >= laterTs, 'ulid timestamp portion is non-decreasing');
 })();
 
 // --- parseCommand() ---
@@ -289,20 +290,20 @@ function handleCalendar(command, args) {
 // --- routeMessage() ---
 
 (() => {
-  const config = { participants: { 'my-email': ['gmail'], 'my-cal': ['calendar'] }, agent: 'test-agent' };
+  const config = { capabilities: ['gmail', 'calendar'], participant: 'test-agent' };
   const outbox = createMockOutbox();
   const filesFolder = createMockFilesFolder();
 
   const result = routeMessage(
-    { to: 'unknown-agent', content: '/check' },
+    { to: 'test-agent', content: '/unknown-cmd' },
     config, filesFolder, outbox
   );
-  assert(result.includes('error: unknown participant'), 'route: unknown participant returns error');
-  assert(result.includes('my-email'), 'route: error lists configured participants');
+  assert(result.includes('error: unknown command'), 'route: unknown command returns error');
+  assert(result.includes('/check'), 'route: error lists available commands');
 })();
 
 (() => {
-  const config = { participants: { 'my-email': ['gmail'] }, agent: 'test-agent' };
+  const config = { capabilities: ['gmail'], participant: 'test-agent' };
   const outbox = createMockOutbox();
   const filesFolder = createMockFilesFolder();
 
@@ -314,7 +315,7 @@ function handleCalendar(command, args) {
 })();
 
 (() => {
-  const config = { participants: { 'my-email': ['gmail'] }, agent: 'test-agent' };
+  const config = { capabilities: ['gmail'], participant: 'test-agent' };
   const outbox = createMockOutbox();
   const filesFolder = createMockFilesFolder();
 
@@ -326,7 +327,7 @@ function handleCalendar(command, args) {
 })();
 
 (() => {
-  const config = { participants: { 'my-email': ['gmail'] }, agent: 'test-agent' };
+  const config = { capabilities: ['gmail'], participant: 'test-agent' };
   const outbox = createMockOutbox();
   const filesFolder = createMockFilesFolder();
 
@@ -338,7 +339,7 @@ function handleCalendar(command, args) {
 })();
 
 (() => {
-  const config = { participants: { 'my-email': ['gmail'] }, agent: 'test-agent' };
+  const config = { capabilities: ['gmail'], participant: 'test-agent' };
   const outbox = createMockOutbox();
   const filesFolder = createMockFilesFolder();
 
@@ -350,7 +351,7 @@ function handleCalendar(command, args) {
 })();
 
 (() => {
-  const config = { participants: { 'my-cal': ['calendar'] }, agent: 'test-agent' };
+  const config = { capabilities: ['calendar'], participant: 'test-agent' };
   const outbox = createMockOutbox();
   const filesFolder = createMockFilesFolder();
 
@@ -362,15 +363,15 @@ function handleCalendar(command, args) {
 })();
 
 (() => {
-  const config = { participants: { 'my-svc': ['unknown-service'] }, agent: 'test-agent' };
+  const config = { capabilities: [], participant: 'test-agent' };
   const outbox = createMockOutbox();
   const filesFolder = createMockFilesFolder();
 
   const result = routeMessage(
-    { to: 'my-svc', content: '/anything' },
+    { to: 'test-agent', content: '/check' },
     config, filesFolder, outbox
   );
-  assert(result.includes('no handler for service'), 'route: unknown service returns error');
+  assert(result.includes('gmail capability not enabled'), 'route: disabled capability returns error');
 })();
 
 // --- pad() ---

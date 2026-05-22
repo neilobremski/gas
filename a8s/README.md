@@ -56,8 +56,8 @@ Tests run with plain Node.js (no dependencies). They exercise pure logic (ulid, 
 | Property | Value |
 |----------|-------|
 | `A8S_ROOT_FOLDER_ID` | Drive folder ID (from the URL) |
-| `A8S_PARTICIPANTS` | `{"my-email": ["gmail"], "my-calendar": ["calendar"]}` |
-| `A8S_AGENT` | Agent name for push notifications, e.g. `"my-agent"` |
+| `A8S_PARTICIPANT` | Who to push notifications to (e.g. `my-agent`) |
+| `CAPABILITIES` | Comma-delimited capabilities (e.g. `gmail,calendar`) |
 
 4. Run `setup()` from the editor to verify config
 5. Run `testConnection()` to confirm Drive access
