@@ -16,10 +16,44 @@ Drive folder layout:
   .files/     ← bidirectional attachments (A8S handles tempfile.org upload/download)
 ```
 
+## Development
+
+### clasp setup
+
+[clasp](https://github.com/nicolo-ribaudo/clasp) is Google's CLI for pushing/pulling Apps Script code.
+
+```bash
+npm install -g @nicolo-ribaudo/clasp
+clasp login
+```
+
+Copy `.clasp.json.example` or create `.clasp.json` with your script ID:
+```json
+{"scriptId": "YOUR_SCRIPT_ID_HERE", "rootDir": "."}
+```
+
+Push local code to GAS:
+```bash
+clasp push
+```
+
+Pull remote changes:
+```bash
+clasp pull
+```
+
+### Running tests
+
+```bash
+tests/run
+```
+
+Tests run with plain Node.js (no dependencies). They exercise the pure logic (ulid, parseCommand, formatEmailForAgent, writeEnvelope, routing) with mocked GAS APIs.
+
 ## Setup
 
 1. Create a folder in Google Drive for this agent
-2. In Apps Script, create a new project and paste `a8s-gas.gs`
+2. Push `Code.js` and `appsscript.json` via `clasp push`
 3. Set Script Properties (Project Settings > Script properties):
 
 | Property | Value |
@@ -103,7 +137,7 @@ Run from the Apps Script editor:
 
 ## Constraints
 
-- Single .gs file, V8 runtime, no external dependencies
+- Single `Code.js` file, V8 runtime, no external dependencies
 - 6-minute execution limit per trigger invocation
 - No persistent state between invocations (Script Properties for dedup)
 - File transfer: GAS writes to `.files/`, A8S file-proxy handles tempfile.org for cross-cluster delivery
