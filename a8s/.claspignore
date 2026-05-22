@@ -1,0 +1,4 @@
+tests/**
+README.md
+.gitignore
+.clasp.json.bak
