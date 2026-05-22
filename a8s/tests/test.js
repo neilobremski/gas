@@ -1,0 +1,650 @@
+'use strict';
+
+let passed = 0;
+let failed = 0;
+
+function assert(condition, msg) {
+  if (condition) {
+    passed++;
+  } else {
+    failed++;
+    console.error(`FAIL: ${msg}`);
+  }
+}
+
+function assertEqual(actual, expected, msg) {
+  if (actual === expected) {
+    passed++;
+  } else {
+    failed++;
+    console.error(`FAIL: ${msg}\n  expected: ${JSON.stringify(expected)}\n  actual:   ${JSON.stringify(actual)}`);
+  }
+}
+
+function assertDeepEqual(actual, expected, msg) {
+  if (JSON.stringify(actual) === JSON.stringify(expected)) {
+    passed++;
+  } else {
+    failed++;
+    console.error(`FAIL: ${msg}\n  expected: ${JSON.stringify(expected)}\n  actual:   ${JSON.stringify(actual)}`);
+  }
+}
+
+// --- Inline pure functions from Code.js for testing ---
+
+const CROCKFORD = '0123456789ABCDEFGHJKMNPQRSTVWXYZ';
+
+function ulid() {
+  let ts = Date.now();
+  const chars = [];
+  for (let i = 9; i >= 0; i--) {
+    chars[i] = CROCKFORD.charAt(ts & 0x1f);
+    ts = Math.floor(ts / 32);
+  }
+  for (let j = 10; j < 26; j++) {
+    chars[j] = CROCKFORD.charAt(Math.floor(Math.random() * 32));
+  }
+  return chars.join('');
+}
+
+function parseCommand(content) {
+  const lines = content.split('\n');
+  const firstLine = lines[0].trim();
+  if (!firstLine.startsWith('/')) return null;
+  const parts = firstLine.split(/\s+/);
+  return { command: parts[0], args: parts.slice(1), body: lines.slice(1).join('\n').trim() };
+}
+
+function formatEmailForAgent(msg, threadId) {
+  const from = msg.getFrom();
+  const subject = msg.getSubject();
+  const date = msg.getDate().toISOString();
+  let body = msg.getPlainBody();
+  if (body.length > 4000) body = body.substring(0, 4000) + '\n[truncated]';
+  return `New email\nthread_id: ${threadId}\nfrom: ${from}\nsubject: ${subject}\ndate: ${date}\n---\n${body}`;
+}
+
+const pad = n => (n < 10 ? '0' : '') + n;
+
+const DRIVE_URL_PATTERN = /https:\/\/(?:drive\.google\.com\/file\/d\/|docs\.google\.com\/(?:document|spreadsheets|presentation)\/d\/)([a-zA-Z0-9_-]+)/g;
+
+function extractDriveLinks(text) {
+  if (!text) return [];
+  const ids = [];
+  let match;
+  const re = new RegExp(DRIVE_URL_PATTERN.source, 'g');
+  while ((match = re.exec(text)) !== null) {
+    if (!ids.includes(match[1])) ids.push(match[1]);
+  }
+  return ids;
+}
+
+function formatEventForAgent(ev, filesFolder) {
+  const start = ev.getStartTime();
+  const end = ev.getEndTime();
+  const lines = [
+    'Calendar event starting soon',
+    `event_id: ${ev.getId()}`,
+    `title: ${ev.getTitle()}`,
+    `start: ${start.toISOString()}`,
+    `end: ${end.toISOString()}`
+  ];
+
+  const location = ev.getLocation();
+  if (location) lines.push(`location: ${location}`);
+
+  const isRecurring = ev.isRecurringEvent();
+  lines.push(`recurring: ${isRecurring ? 'yes' : 'no'}`);
+
+  const guests = ev.getGuestList();
+  if (guests.length) {
+    lines.push(`attendees: ${guests.map(g => g.getEmail()).join(', ')}`);
+  }
+
+  const description = ev.getDescription();
+  lines.push('---');
+  if (description) lines.push(description);
+
+  const content = lines.join('\n');
+  const files = [];
+
+  if (filesFolder && description) {
+    const fileIds = extractDriveLinks(description);
+    fileIds.forEach(id => {
+      try {
+        files.push(mockDownloadDriveFile(id, filesFolder));
+      } catch (e) {
+        // skip
+      }
+    });
+  }
+
+  return { content, files };
+}
+
+function mockDownloadDriveFile(fileId, filesFolder) {
+  const filename = `file_${fileId}.md`;
+  filesFolder.createFile(filename, 'mock content', 'text/markdown');
+  return { filename, path: `./.files/${filename}` };
+}
+
+function writeEnvelope(outbox, to, content, files) {
+  const envelope = {
+    id: ulid(),
+    date: new Date().toISOString(),
+    to,
+    content
+  };
+  if (files && files.length) envelope.files = files;
+  outbox.createFile(`${envelope.id}.json`, JSON.stringify(envelope, null, 2), 'application/json');
+  return envelope;
+}
+
+const GMAIL_COMMANDS = ['/check', '/search', '/read', '/send', '/reply'];
+const CALENDAR_COMMANDS = ['/today', '/week', '/create'];
+
+function routeMessage(envelope, config, filesFolder, outbox) {
+  const parsed = parseCommand(envelope.content || '');
+  if (!parsed) return 'error: message must start with a /command';
+  const { command } = parsed;
+  if (GMAIL_COMMANDS.includes(command)) {
+    if (!config.capabilities.includes('gmail')) return 'error: gmail capability not enabled';
+    return handleGmail(parsed.command, parsed.args, parsed.body, envelope, filesFolder, outbox, config);
+  }
+  if (CALENDAR_COMMANDS.includes(command)) {
+    if (!config.capabilities.includes('calendar')) return 'error: calendar capability not enabled';
+    return handleCalendar(parsed.command, parsed.args);
+  }
+  return `error: unknown command "${command}"\navailable: ${GMAIL_COMMANDS.concat(CALENDAR_COMMANDS).join(', ')}`;
+}
+
+// --- GAS API Mocks ---
+
+function createMockGmailApp({ threads = [], unreadCount = 0 } = {}) {
+  return {
+    search: () => threads,
+    getInboxUnreadCount: () => unreadCount,
+    getThreadById: (id) => {
+      const t = threads.find(t => t._id === id);
+      if (!t) throw new Error(`thread not found: ${id}`);
+      return t;
+    },
+    sendEmail: () => {}
+  };
+}
+
+function createMockThread(id, messages) {
+  return {
+    _id: id,
+    getId: () => id,
+    getMessages: () => messages,
+    getMessageCount: () => messages.length
+  };
+}
+
+function createMockMessage({ from, subject, date, body, unread = false, attachments = [] }) {
+  return {
+    getFrom: () => from,
+    getSubject: () => subject,
+    getDate: () => new Date(date),
+    getPlainBody: () => body,
+    isUnread: () => unread,
+    markRead: () => {},
+    getAttachments: () => attachments,
+    reply: () => {}
+  };
+}
+
+function createMockOutbox() {
+  const files = [];
+  return {
+    createFile: (name, content, mimeType) => files.push({ name, content, mimeType }),
+    getFiles: () => files
+  };
+}
+
+function createMockFilesFolder() {
+  const created = [];
+  return {
+    getFilesByName: (name) => {
+      const found = created.find(f => f.name === name);
+      return { hasNext: () => !!found, next: () => found };
+    },
+    createFile: (nameOrBlob, content, mimeType) => {
+      const entry = typeof nameOrBlob === 'string'
+        ? { name: nameOrBlob, content, mimeType }
+        : { name: nameOrBlob.name || 'blob', content: null, mimeType: null };
+      created.push(entry);
+      return entry;
+    },
+    _created: created
+  };
+}
+
+function createMockEvent({ id, title, start, end, location = '', description = '', recurring = false, guests = [] }) {
+  return {
+    getId: () => id,
+    getTitle: () => title,
+    getStartTime: () => new Date(start),
+    getEndTime: () => new Date(end),
+    getLocation: () => location,
+    getDescription: () => description,
+    isRecurringEvent: () => recurring,
+    getGuestList: () => guests.map(email => ({ getEmail: () => email }))
+  };
+}
+
+// Gmail handler (simplified for testing)
+function handleGmail(command, args, body, envelope, filesFolder, outbox, config) {
+  if (command === '/check') {
+    return '0 unread\n';
+  }
+  if (command === '/search') {
+    const query = args.join(' ');
+    if (!query) return 'error: /search requires a query';
+    return `no results for: ${query}`;
+  }
+  if (command === '/read') {
+    const threadId = args[0];
+    if (!threadId) return 'error: /read requires a thread ID';
+    return `thread_id: ${threadId}\n\n--- test (2026-01-01T00:00:00.000Z) ---\nhello`;
+  }
+  if (command === '/send' || command === '/reply') {
+    if (command === '/reply') {
+      const replyThreadId = args[0];
+      if (!replyThreadId) return 'error: /reply requires a thread_id';
+      return `replied to thread ${replyThreadId}`;
+    }
+    if (args.length < 2) return 'error: /send <to> <subject>';
+    return `sent to ${args[0]}: ${args.slice(1).join(' ')}`;
+  }
+  return `unknown: ${command}\navailable: /check, /search, /read, /send, /reply`;
+}
+
+function handleCalendar(command, args) {
+  if (command === '/today') return 'no events today';
+  if (command === '/week') return 'no events this week';
+  if (command === '/create') {
+    if (args.length < 2) return 'error: /create <title> <datetime>';
+    return `created: ${args[0]} at mock-time`;
+  }
+  return `unknown: ${command}\navailable: /today, /week, /create`;
+}
+
+// ===== TESTS =====
+
+// --- ulid() ---
+
+(() => {
+  const id = ulid();
+  assertEqual(id.length, 26, 'ulid is 26 chars');
+  assert(/^[0-9A-TV-Z]+$/.test(id), 'ulid uses Crockford base32 chars');
+
+  const id2 = ulid();
+  assert(id !== id2, 'ulid generates unique values');
+
+  const earlier = ulid();
+  const laterTs = earlier.substring(0, 10);
+  const later = ulid();
+  const laterTs2 = later.substring(0, 10);
+  assert(laterTs2 >= laterTs, 'ulid timestamp portion is non-decreasing');
+})();
+
+// --- parseCommand() ---
+
+(() => {
+  const result = parseCommand('/check');
+  assertEqual(result.command, '/check', 'parseCommand: simple command');
+  assertEqual(result.args.length, 0, 'parseCommand: no args');
+  assertEqual(result.body, '', 'parseCommand: no body');
+})();
+
+(() => {
+  const result = parseCommand('/send alice@example.com Hello World\nThis is the body');
+  assertEqual(result.command, '/send', 'parseCommand: command with args');
+  assertEqual(result.args[0], 'alice@example.com', 'parseCommand: first arg');
+  assertEqual(result.args.length, 3, 'parseCommand: arg count');
+  assertEqual(result.body, 'This is the body', 'parseCommand: body extracted');
+})();
+
+(() => {
+  const result = parseCommand('/reply thread123\nLine 1\nLine 2');
+  assertEqual(result.command, '/reply', 'parseCommand: /reply command');
+  assertEqual(result.args[0], 'thread123', 'parseCommand: thread_id arg');
+  assertEqual(result.body, 'Line 1\nLine 2', 'parseCommand: multiline body');
+})();
+
+(() => {
+  const result = parseCommand('not a command');
+  assertEqual(result, null, 'parseCommand: non-command returns null');
+})();
+
+(() => {
+  const result = parseCommand('  /check  ');
+  assertEqual(result.command, '/check', 'parseCommand: trims whitespace');
+})();
+
+// --- formatEmailForAgent() ---
+
+(() => {
+  const msg = createMockMessage({
+    from: 'alice@example.com',
+    subject: 'Test Subject',
+    date: '2026-01-15T10:30:00Z',
+    body: 'Hello there'
+  });
+  const result = formatEmailForAgent(msg, 'thread_abc');
+  assert(result.includes('New email'), 'formatEmail: starts with New email');
+  assert(result.includes('thread_id: thread_abc'), 'formatEmail: includes thread_id');
+  assert(result.includes('from: alice@example.com'), 'formatEmail: includes from');
+  assert(result.includes('subject: Test Subject'), 'formatEmail: includes subject');
+  assert(result.includes('date: 2026-01-15T10:30:00.000Z'), 'formatEmail: includes date');
+  assert(result.includes('---\nHello there'), 'formatEmail: includes body after separator');
+})();
+
+(() => {
+  const longBody = 'x'.repeat(5000);
+  const msg = createMockMessage({
+    from: 'bob@example.com',
+    subject: 'Long',
+    date: '2026-01-15T10:30:00Z',
+    body: longBody
+  });
+  const result = formatEmailForAgent(msg, 'thread_long');
+  assert(result.includes('[truncated]'), 'formatEmail: truncates body over 4000 chars');
+  assert(!result.includes('x'.repeat(5000)), 'formatEmail: body is actually shorter');
+})();
+
+// --- writeEnvelope() ---
+
+(() => {
+  const outbox = createMockOutbox();
+  const env = writeEnvelope(outbox, 'my-agent', 'hello content', null);
+  assertEqual(env.to, 'my-agent', 'writeEnvelope: sets to');
+  assertEqual(env.content, 'hello content', 'writeEnvelope: sets content');
+  assertEqual(env.id.length, 26, 'writeEnvelope: id is ulid');
+  assert(env.date.includes('T'), 'writeEnvelope: date is ISO');
+  assert(!env.files, 'writeEnvelope: no files when null');
+  assertEqual(outbox.getFiles().length, 1, 'writeEnvelope: creates file in outbox');
+})();
+
+(() => {
+  const outbox = createMockOutbox();
+  const files = [{ filename: 'doc.pdf', path: './.files/doc.pdf' }];
+  const env = writeEnvelope(outbox, 'my-agent', 'with attachment', files);
+  assertEqual(env.files.length, 1, 'writeEnvelope: includes files');
+  assertEqual(env.files[0].filename, 'doc.pdf', 'writeEnvelope: file reference correct');
+})();
+
+(() => {
+  const outbox = createMockOutbox();
+  writeEnvelope(outbox, 'my-agent', 'test', []);
+  assert(!outbox.getFiles()[0].content.includes('"files"'), 'writeEnvelope: empty files array omitted');
+})();
+
+// --- routeMessage() ---
+
+(() => {
+  const config = { capabilities: ['gmail', 'calendar'], participant: 'test-agent' };
+  const outbox = createMockOutbox();
+  const filesFolder = createMockFilesFolder();
+
+  const result = routeMessage(
+    { to: 'test-agent', content: '/unknown-cmd' },
+    config, filesFolder, outbox
+  );
+  assert(result.includes('error: unknown command'), 'route: unknown command returns error');
+  assert(result.includes('/check'), 'route: error lists available commands');
+})();
+
+(() => {
+  const config = { capabilities: ['gmail'], participant: 'test-agent' };
+  const outbox = createMockOutbox();
+  const filesFolder = createMockFilesFolder();
+
+  const result = routeMessage(
+    { to: 'my-email', content: '/check' },
+    config, filesFolder, outbox
+  );
+  assert(result.includes('unread'), 'route: /check routes to gmail handler');
+})();
+
+(() => {
+  const config = { capabilities: ['gmail'], participant: 'test-agent' };
+  const outbox = createMockOutbox();
+  const filesFolder = createMockFilesFolder();
+
+  const result = routeMessage(
+    { to: 'my-email', content: '/reply' },
+    config, filesFolder, outbox
+  );
+  assertEqual(result, 'error: /reply requires a thread_id', 'route: /reply without thread_id returns error');
+})();
+
+(() => {
+  const config = { capabilities: ['gmail'], participant: 'test-agent' };
+  const outbox = createMockOutbox();
+  const filesFolder = createMockFilesFolder();
+
+  const result = routeMessage(
+    { to: 'my-email', content: '/send alice@example.com' },
+    config, filesFolder, outbox
+  );
+  assertEqual(result, 'error: /send <to> <subject>', 'route: /send without enough args returns error');
+})();
+
+(() => {
+  const config = { capabilities: ['gmail'], participant: 'test-agent' };
+  const outbox = createMockOutbox();
+  const filesFolder = createMockFilesFolder();
+
+  const result = routeMessage(
+    { to: 'my-email', content: 'plain text no command' },
+    config, filesFolder, outbox
+  );
+  assertEqual(result, 'error: message must start with a /command', 'route: non-command content returns error');
+})();
+
+(() => {
+  const config = { capabilities: ['calendar'], participant: 'test-agent' };
+  const outbox = createMockOutbox();
+  const filesFolder = createMockFilesFolder();
+
+  const result = routeMessage(
+    { to: 'my-cal', content: '/today' },
+    config, filesFolder, outbox
+  );
+  assertEqual(result, 'no events today', 'route: /today routes to calendar handler');
+})();
+
+(() => {
+  const config = { capabilities: [], participant: 'test-agent' };
+  const outbox = createMockOutbox();
+  const filesFolder = createMockFilesFolder();
+
+  const result = routeMessage(
+    { to: 'test-agent', content: '/check' },
+    config, filesFolder, outbox
+  );
+  assert(result.includes('gmail capability not enabled'), 'route: disabled capability returns error');
+})();
+
+// --- pad() ---
+
+(() => {
+  assertEqual(pad(0), '00', 'pad: zero');
+  assertEqual(pad(5), '05', 'pad: single digit');
+  assertEqual(pad(10), '10', 'pad: double digit unchanged');
+  assertEqual(pad(23), '23', 'pad: larger double digit');
+})();
+
+// --- extractDriveLinks() ---
+
+(() => {
+  const ids = extractDriveLinks('Check this doc: https://docs.google.com/document/d/1abc_DEF-123/edit');
+  assertDeepEqual(ids, ['1abc_DEF-123'], 'extractDriveLinks: Google Doc URL');
+})();
+
+(() => {
+  const ids = extractDriveLinks('https://drive.google.com/file/d/0BxHZ7abc123/view?usp=sharing');
+  assertDeepEqual(ids, ['0BxHZ7abc123'], 'extractDriveLinks: Drive file URL');
+})();
+
+(() => {
+  const ids = extractDriveLinks('https://docs.google.com/spreadsheets/d/sp123ABC/edit#gid=0');
+  assertDeepEqual(ids, ['sp123ABC'], 'extractDriveLinks: Sheets URL');
+})();
+
+(() => {
+  const ids = extractDriveLinks('https://docs.google.com/presentation/d/pres_XYZ/edit');
+  assertDeepEqual(ids, ['pres_XYZ'], 'extractDriveLinks: Slides URL');
+})();
+
+(() => {
+  const text = 'Doc: https://docs.google.com/document/d/abc123/edit\nSheet: https://docs.google.com/spreadsheets/d/def456/edit';
+  const ids = extractDriveLinks(text);
+  assertDeepEqual(ids, ['abc123', 'def456'], 'extractDriveLinks: multiple URLs');
+})();
+
+(() => {
+  const text = 'https://docs.google.com/document/d/same_id/edit and https://docs.google.com/document/d/same_id/preview';
+  const ids = extractDriveLinks(text);
+  assertDeepEqual(ids, ['same_id'], 'extractDriveLinks: deduplicates same ID');
+})();
+
+(() => {
+  const ids = extractDriveLinks('no links here, just text');
+  assertDeepEqual(ids, [], 'extractDriveLinks: no links returns empty');
+})();
+
+(() => {
+  const ids = extractDriveLinks(null);
+  assertDeepEqual(ids, [], 'extractDriveLinks: null returns empty');
+})();
+
+(() => {
+  const ids = extractDriveLinks('');
+  assertDeepEqual(ids, [], 'extractDriveLinks: empty string returns empty');
+})();
+
+(() => {
+  const ids = extractDriveLinks('https://www.google.com/search?q=test');
+  assertDeepEqual(ids, [], 'extractDriveLinks: non-Drive Google URL ignored');
+})();
+
+// --- formatEventForAgent() ---
+
+(() => {
+  const ev = createMockEvent({
+    id: 'evt_123',
+    title: 'Daily Standup',
+    start: '2026-05-22T14:30:00.000Z',
+    end: '2026-05-22T14:45:00.000Z',
+    location: 'Zoom https://zoom.us/j/123',
+    description: 'Stand up meeting notes',
+    recurring: true,
+    guests: ['alice@example.com', 'bob@example.com']
+  });
+  const { content, files } = formatEventForAgent(ev, null);
+  assert(content.startsWith('Calendar event starting soon'), 'formatEvent: starts with header');
+  assert(content.includes('event_id: evt_123'), 'formatEvent: includes event_id');
+  assert(content.includes('title: Daily Standup'), 'formatEvent: includes title');
+  assert(content.includes('start: 2026-05-22T14:30:00.000Z'), 'formatEvent: includes start ISO');
+  assert(content.includes('end: 2026-05-22T14:45:00.000Z'), 'formatEvent: includes end ISO');
+  assert(content.includes('location: Zoom https://zoom.us/j/123'), 'formatEvent: includes location');
+  assert(content.includes('recurring: yes'), 'formatEvent: includes recurring flag');
+  assert(content.includes('attendees: alice@example.com, bob@example.com'), 'formatEvent: includes attendees');
+  assert(content.includes('---\nStand up meeting notes'), 'formatEvent: includes description after separator');
+  assertDeepEqual(files, [], 'formatEvent: no files when filesFolder is null');
+})();
+
+(() => {
+  const ev = createMockEvent({
+    id: 'evt_minimal',
+    title: 'Quick Chat',
+    start: '2026-05-22T09:00:00.000Z',
+    end: '2026-05-22T09:30:00.000Z'
+  });
+  const { content } = formatEventForAgent(ev, null);
+  assert(!content.includes('location:'), 'formatEvent: omits location when empty');
+  assert(content.includes('recurring: no'), 'formatEvent: recurring no for non-recurring');
+  assert(!content.includes('attendees:'), 'formatEvent: omits attendees when none');
+  assert(content.endsWith('---'), 'formatEvent: ends with separator when no description');
+})();
+
+(() => {
+  const ev = createMockEvent({
+    id: 'recurring_abc',
+    title: 'Morning Briefing',
+    start: '2026-05-22T07:00:00.000Z',
+    end: '2026-05-22T07:15:00.000Z',
+    description: 'Check email, review calendar, prepare daily plan',
+    recurring: true
+  });
+  const { content } = formatEventForAgent(ev, null);
+  assert(content.includes('recurring: yes'), 'formatEvent: recurring event for scheduling');
+  assert(content.includes('Check email, review calendar, prepare daily plan'), 'formatEvent: description carries the prompt');
+})();
+
+// --- formatEventForAgent with Drive links ---
+
+(() => {
+  const ev = createMockEvent({
+    id: 'evt_drive',
+    title: 'Review Meeting',
+    start: '2026-05-22T10:00:00.000Z',
+    end: '2026-05-22T11:00:00.000Z',
+    description: 'Agenda: https://docs.google.com/document/d/doc_abc123/edit\nSlides: https://docs.google.com/presentation/d/pres_xyz/edit'
+  });
+  const filesFolder = createMockFilesFolder();
+  const { content, files } = formatEventForAgent(ev, filesFolder);
+  assertEqual(files.length, 2, 'formatEvent+drive: downloads 2 files');
+  assertEqual(files[0].filename, 'file_doc_abc123.md', 'formatEvent+drive: first file named correctly');
+  assertEqual(files[1].filename, 'file_pres_xyz.md', 'formatEvent+drive: second file named correctly');
+  assert(content.includes('https://docs.google.com/document/d/doc_abc123/edit'), 'formatEvent+drive: content still has URLs');
+})();
+
+(() => {
+  const ev = createMockEvent({
+    id: 'evt_no_drive',
+    title: 'Lunch',
+    start: '2026-05-22T12:00:00.000Z',
+    end: '2026-05-22T13:00:00.000Z',
+    description: 'Meet at the cafeteria'
+  });
+  const filesFolder = createMockFilesFolder();
+  const { files } = formatEventForAgent(ev, filesFolder);
+  assertDeepEqual(files, [], 'formatEvent+drive: no drive links means no files');
+})();
+
+// --- Trigger interval config ---
+
+(() => {
+  const valid = [1, 5, 10, 15, 30];
+  assert(valid.includes(1), 'triggerConfig: 1 is valid');
+  assert(valid.includes(5), 'triggerConfig: 5 is valid');
+  assert(valid.includes(10), 'triggerConfig: 10 is valid');
+  assert(valid.includes(15), 'triggerConfig: 15 is valid');
+  assert(valid.includes(30), 'triggerConfig: 30 is valid');
+  assert(!valid.includes(2), 'triggerConfig: 2 is not valid');
+  assert(!valid.includes(7), 'triggerConfig: 7 is not valid');
+  assert(!valid.includes(60), 'triggerConfig: 60 is not valid');
+
+  // Simulate getConfig logic
+  const parseInterval = (raw) => {
+    const n = parseInt(raw || '5', 10);
+    return valid.includes(n) ? n : 5;
+  };
+  assertEqual(parseInterval('1'), 1, 'triggerConfig: parses 1');
+  assertEqual(parseInterval('5'), 5, 'triggerConfig: parses 5');
+  assertEqual(parseInterval('30'), 30, 'triggerConfig: parses 30');
+  assertEqual(parseInterval(''), 5, 'triggerConfig: empty defaults to 5');
+  assertEqual(parseInterval(null), 5, 'triggerConfig: null defaults to 5');
+  assertEqual(parseInterval('3'), 5, 'triggerConfig: invalid falls back to 5');
+  assertEqual(parseInterval('abc'), 5, 'triggerConfig: NaN falls back to 5');
+})();
+
+// --- Report ---
+
+console.log(`\n${passed + failed} tests, ${passed} passed, ${failed} failed`);
+if (failed > 0) process.exit(1);
