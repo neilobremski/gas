@@ -65,10 +65,19 @@ const A8S = (() => {
     return ids;
   }
 
+  function hashPrefix(str) {
+    let h = 0;
+    for (let i = 0; i < str.length; i++) {
+      h = ((h << 5) - h + str.charCodeAt(i)) | 0;
+    }
+    return (h >>> 0).toString(16).padStart(8, '0');
+  }
+
   function downloadDriveFile(fileId, filesFolder) {
     const file = DriveApp.getFileById(fileId);
     const mimeType = file.getMimeType();
     const name = file.getName();
+    const prefix = hashPrefix(fileId);
 
     if (mimeType === 'application/vnd.google-apps.document') {
       let content;
@@ -77,14 +86,14 @@ const A8S = (() => {
       } catch (e) {
         content = file.getAs('text/plain').getDataAsString();
       }
-      const filename = name + '.md';
+      const filename = `${prefix}-${name}.md`;
       const iter = filesFolder.getFilesByName(filename);
       if (iter.hasNext()) return { filename, path: `./.files/${filename}` };
       filesFolder.createFile(filename, content, 'text/markdown');
       return { filename, path: `./.files/${filename}` };
     }
 
-    const filename = name;
+    const filename = `${prefix}-${name}`;
     const iter = filesFolder.getFilesByName(filename);
     if (iter.hasNext()) return { filename, path: `./.files/${filename}` };
     const blob = file.getBlob();
@@ -534,7 +543,7 @@ const A8S = (() => {
     installTrigger,
     removeTrigger,
     testConnection,
-    _testing: { ulid, parseCommand, formatEmailForAgent, formatEventForAgent, writeEnvelope, routeMessage, pad, extractDriveLinks, exportDocAsMarkdown, downloadDriveFile, getConfig }
+    _testing: { ulid, parseCommand, formatEmailForAgent, formatEventForAgent, writeEnvelope, routeMessage, pad, extractDriveLinks, exportDocAsMarkdown, downloadDriveFile, hashPrefix, getConfig }
   };
 
 })();
