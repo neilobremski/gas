@@ -20,35 +20,32 @@ Drive folder layout:
 
 ### clasp setup
 
-[clasp](https://github.com/nicolo-ribaudo/clasp) is Google's CLI for pushing/pulling Apps Script code.
+[clasp](https://github.com/google/clasp) is Google's CLI for pushing/pulling Apps Script code.
 
 ```bash
-npm install -g @nicolo-ribaudo/clasp
+npm install -g @google/clasp
 clasp login
+clasp create --type standalone --title "A8S GAS"   # or set scriptId in .clasp.json
 ```
 
-Copy `.clasp.json.example` or create `.clasp.json` with your script ID:
-```json
-{"scriptId": "YOUR_SCRIPT_ID_HERE", "rootDir": "."}
-```
-
-Push local code to GAS:
-```bash
-clasp push
-```
-
-Pull remote changes:
-```bash
-clasp pull
-```
-
-### Running tests
+### Deploy (test + push)
 
 ```bash
-tests/run
+./deploy.sh
 ```
 
-Tests run with plain Node.js (no dependencies). They exercise the pure logic (ulid, parseCommand, formatEmailForAgent, writeEnvelope, routing) with mocked GAS APIs.
+This runs tests locally, then pushes to GAS via clasp.
+
+### Manual commands
+
+```bash
+tests/run      # run tests only
+clasp push     # push without testing
+clasp pull     # pull remote changes
+clasp open     # open in browser
+```
+
+Tests run with plain Node.js (no dependencies). They exercise pure logic (ulid, parseCommand, formatEmailForAgent, writeEnvelope, routing) with mocked GAS APIs.
 
 ## Setup
 
