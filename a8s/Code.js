@@ -168,6 +168,42 @@ const A8S = (() => {
     });
   }
 
+  // --- Calendar Push (upcoming events → tell participant) ---
+
+  function pushUpcomingEvents(config, outbox) {
+    if (!config.participant || !config.capabilities.includes('calendar')) return;
+
+    const cal = CalendarApp.getDefaultCalendar();
+    const now = new Date();
+    const soon = new Date(now.getTime() + 15 * 60000);
+    const events = cal.getEvents(now, soon);
+    if (!events.length) return;
+
+    const props = PropertiesService.getScriptProperties();
+    const notifiedKey = '_a8s_notified_events';
+    const notified = JSON.parse(props.getProperty(notifiedKey) || '{}');
+
+    const newEvents = [];
+    events.forEach(ev => {
+      const id = ev.getId();
+      if (!notified[id]) {
+        const start = ev.getStartTime();
+        newEvents.push(`${pad(start.getHours())}:${pad(start.getMinutes())} ${ev.getTitle()}`);
+        notified[id] = now.toISOString();
+      }
+    });
+
+    if (newEvents.length) {
+      writeEnvelope(outbox, config.participant, `upcoming in 15min:\n${newEvents.join('\n')}`);
+    }
+
+    const cutoff = now.getTime() - 3600000;
+    for (const id in notified) {
+      if (new Date(notified[id]).getTime() < cutoff) delete notified[id];
+    }
+    props.setProperty(notifiedKey, JSON.stringify(notified));
+  }
+
   // --- Calendar Handler ---
 
   function handleCalendar(command, args) {
@@ -292,6 +328,12 @@ const A8S = (() => {
       pushNewEmails(config, outbox, filesFolder);
     } catch (e) {
       console.log(`email push failed: ${e.message}`);
+    }
+
+    try {
+      pushUpcomingEvents(config, outbox);
+    } catch (e) {
+      console.log(`calendar push failed: ${e.message}`);
     }
   }
 
