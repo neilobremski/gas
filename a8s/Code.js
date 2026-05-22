@@ -35,6 +35,8 @@ const A8S = (() => {
     return root.createFolder(name);
   }
 
+  const _logs = [];
+
   function writeEnvelope(outbox, to, content, files) {
     const envelope = {
       id: ulid(),
@@ -43,6 +45,7 @@ const A8S = (() => {
       content
     };
     if (files && files.length) envelope.files = files;
+    if (_logs.length) envelope.logs = _logs.splice(0);
     outbox.createFile(`${envelope.id}.json`, JSON.stringify(envelope, null, 2), 'application/json');
     return envelope;
   }
@@ -263,15 +266,47 @@ const A8S = (() => {
     const content = lines.join('\n');
     const files = [];
 
-    if (filesFolder && description) {
-      const fileIds = extractDriveLinks(description);
-      fileIds.forEach(id => {
-        try {
-          files.push(downloadDriveFile(id, filesFolder));
-        } catch (e) {
-          console.log(`drive download failed for ${id}: ${e.message}`);
+    if (filesFolder) {
+      // Drive links in description
+      if (description) {
+        const fileIds = extractDriveLinks(description);
+        _logs.push(`description drive links: ${fileIds.length}`);
+        fileIds.forEach(id => {
+          try {
+            files.push(downloadDriveFile(id, filesFolder));
+          } catch (e) {
+            _logs.push(`drive download failed for ${id}: ${e.message}`);
+          }
+        });
+      }
+
+      // Calendar event attachments (requires Calendar Advanced Service)
+      try {
+        const calId = ev.getOriginalCalendarId ? ev.getOriginalCalendarId() : 'primary';
+        const eventId = ev.getId().replace(/@.*$/, '');
+        _logs.push(`fetching attachments for event ${eventId}`);
+        const advEvent = Calendar.Events.get(calId, eventId);
+        if (advEvent.attachments && advEvent.attachments.length) {
+          _logs.push(`found ${advEvent.attachments.length} attachment(s)`);
+          advEvent.attachments.forEach(att => {
+            try {
+              const fileId = att.fileId;
+              if (fileId) {
+                files.push(downloadDriveFile(fileId, filesFolder));
+              } else if (att.fileUrl) {
+                const extracted = extractDriveLinks(att.fileUrl);
+                extracted.forEach(id => files.push(downloadDriveFile(id, filesFolder)));
+              }
+            } catch (e) {
+              _logs.push(`attachment download failed: ${e.message}`);
+            }
+          });
+        } else {
+          _logs.push('no attachments on event');
         }
-      });
+      } catch (e) {
+        _logs.push(`Calendar Advanced Service: ${e.message}`);
+      }
     }
 
     return { content, files };
