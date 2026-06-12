@@ -1,4 +1,11 @@
+node_modules/**
 tests/**
 README.md
+THIRD_PARTY_NOTICES.md
+package.json
+package-lock.json
+deploy.sh
 .gitignore
+scripts/**
 .clasp.json.bak
+vendor/marked.LICENSE.md

@@ -1,5 +1,7 @@
 'use strict';
 
+const { marked } = require('marked');
+
 let passed = 0;
 let failed = 0;
 
@@ -53,6 +55,146 @@ function parseCommand(content) {
   if (!firstLine.startsWith('/')) return null;
   const parts = firstLine.split(/\s+/);
   return { command: parts[0], args: parts.slice(1), body: lines.slice(1).join('\n').trim() };
+}
+
+// --- Markdown email helpers (mirrored from Code.js) ---
+
+const MAX_HTML_BODY_BYTES = 200 * 1024;
+
+const ALLOWED_HTML_TAGS = {
+  a: true, b: true, blockquote: true, br: true, code: true, em: true,
+  h1: true, h2: true, h3: true, h4: true, h5: true, h6: true, hr: true,
+  i: true, li: true, ol: true, p: true, pre: true, strong: true, ul: true
+};
+
+const MD_PATTERNS = [
+  /^#{1,6}\s/m,
+  /^[-*]\s/m,
+  /^\d+\.\s/m,
+  /\*\*[^*\n]+\*\*/,
+  /\*[^*\n]+\*/,
+  /_[^_\n]+_/,
+  /`[^`\n]+`/,
+  /\[[^\]]+\]\(https?:\/\/[^)]+\)/,
+  /^```/m
+];
+
+function bodyForMarkdownDetection(body) {
+  const lines = body.split('\n');
+  const idx = lines.findIndex(l => /^On .+ wrote:\s*$/i.test(l.trim()));
+  if (idx === -1) return body;
+  return lines.slice(0, idx).join('\n');
+}
+
+function detectMarkdown(body) {
+  if (!body || !body.trim()) return false;
+  const scan = bodyForMarkdownDetection(body);
+  return MD_PATTERNS.some(re => re.test(scan));
+}
+
+function parseMarkdownFlags(args) {
+  let markdownMode = null;
+  const remaining = [];
+  args.forEach(a => {
+    if (a === '--markdown') markdownMode = 'force';
+    else if (a === '--no-markdown') markdownMode = 'disable';
+    else remaining.push(a);
+  });
+  return { remainingArgs: remaining, markdownMode };
+}
+
+function effectiveMarkdownMode(flagMode, config) {
+  if (flagMode === 'force') return 'force';
+  if (flagMode === 'disable') return 'disable';
+  return config.markdownAuto ? 'auto' : 'disable';
+}
+
+function sanitizeHtml(html) {
+  if (!html) return '';
+  let out = html.replace(/<script\b[\s\S]*?<\/script>/gi, '');
+  out = out.replace(/<style\b[\s\S]*?<\/style>/gi, '');
+  out = out.replace(/<!--[\s\S]*?-->/g, '');
+  out = out.replace(/<\/?([a-zA-Z][a-zA-Z0-9]*)\b([^>]*)>/g, (match, tag, attrs) => {
+    const t = tag.toLowerCase();
+    if (match.charAt(1) === '/') {
+      return ALLOWED_HTML_TAGS[t] ? `</${t}>` : '';
+    }
+    if (!ALLOWED_HTML_TAGS[t]) return '';
+    if (t === 'br' || t === 'hr') return `<${t}>`;
+    if (t === 'a') {
+      const hrefMatch = attrs.match(/\bhref\s*=\s*("([^"]*)"|'([^']*)'|([^\s>]+))/i);
+      const href = (hrefMatch && (hrefMatch[2] || hrefMatch[3] || hrefMatch[4] || '')).trim();
+      if (!/^https?:\/\//i.test(href) && !/^mailto:/i.test(href)) return '';
+      const safe = href.replace(/"/g, '&quot;').replace(/javascript:/gi, '');
+      return `<a href="${safe}">`;
+    }
+    return `<${t}>`;
+  });
+  return out.replace(/javascript:/gi, '');
+}
+
+function buildHtmlBody(body, markdownMode, config) {
+  if (!body || markdownMode === 'disable') return null;
+  const shouldConvert = markdownMode === 'force' ||
+    (markdownMode === 'auto' && detectMarkdown(body));
+  if (!shouldConvert) return null;
+  try {
+    let html = marked.parse(body, { breaks: true });
+    html = sanitizeHtml(html);
+    if (!html) return null;
+    if (Buffer.byteLength(html, 'utf8') > MAX_HTML_BODY_BYTES) return null;
+    return html;
+  } catch (e) {
+    return null;
+  }
+}
+
+function buildMailOpts(body, args, config, attachments) {
+  const { remainingArgs, markdownMode: flagMode } = parseMarkdownFlags(args);
+  const opts = {};
+  if (attachments.length) opts.attachments = attachments;
+  const html = buildHtmlBody(body, effectiveMarkdownMode(flagMode, config), config);
+  if (html) opts.htmlBody = html;
+  return { opts, remainingArgs };
+}
+
+function formatMarkdownLogNotes(body, args, config, htmlSent) {
+  const { markdownMode: flagMode } = parseMarkdownFlags(args || []);
+  const mode = effectiveMarkdownMode(flagMode, config);
+  const detected = detectMarkdown(body || '');
+  return `mode=${mode}, md=${detected ? 'detected' : 'no'}, html=${htmlSent ? 'yes' : 'no'}`;
+}
+
+function toLogAction(command) {
+  return 'a8s' + command.replace('/', '.');
+}
+
+function formatCommandParams(parsed, envelope) {
+  const parts = [`from=${envelope.from || ''}`];
+  const { remainingArgs } = parseMarkdownFlags(parsed.args);
+  if (parsed.args.includes('--markdown')) parts.push('--markdown');
+  if (parsed.args.includes('--no-markdown')) parts.push('--no-markdown');
+  if (parsed.command === '/send') {
+    if (remainingArgs[0]) parts.push(`to=${remainingArgs[0]}`);
+    if (remainingArgs.length > 1) parts.push('subject');
+  } else if (parsed.command === '/reply') {
+    if (remainingArgs[0]) parts.push(`thread_id=${remainingArgs[0]}`);
+  } else if (parsed.command === '/read') {
+    if (remainingArgs[0]) parts.push(`thread_id=${remainingArgs[0]}`);
+  } else if (parsed.command === '/search') {
+    parts.push('query');
+  } else if (parsed.command === '/create') {
+    parts.push('title, datetime');
+  }
+  return parts.join(', ');
+}
+
+function formatLogStatus(response) {
+  const text = String(response);
+  if (text.startsWith('error:')) return text;
+  if (text.startsWith('unknown:')) return 'error: ' + text.split('\n')[0];
+  if (text.startsWith('rejected:')) return text;
+  return 'ok';
 }
 
 function formatEmailForAgent(msg, threadId) {
@@ -160,7 +302,7 @@ function routeMessage(envelope, config, filesFolder, outbox) {
 
 // --- GAS API Mocks ---
 
-function createMockGmailApp({ threads = [], unreadCount = 0 } = {}) {
+function createMockGmailApp({ threads = [], unreadCount = 0, onSendEmail, onReply } = {}) {
   return {
     search: () => threads,
     getInboxUnreadCount: () => unreadCount,
@@ -169,7 +311,9 @@ function createMockGmailApp({ threads = [], unreadCount = 0 } = {}) {
       if (!t) throw new Error(`thread not found: ${id}`);
       return t;
     },
-    sendEmail: () => {}
+    sendEmail: (to, subject, body, opts) => {
+      if (onSendEmail) onSendEmail({ to, subject, body, opts });
+    }
   };
 }
 
@@ -182,7 +326,7 @@ function createMockThread(id, messages) {
   };
 }
 
-function createMockMessage({ from, subject, date, body, unread = false, attachments = [] }) {
+function createMockMessage({ from, subject, date, body, unread = false, attachments = [], onReply } = {}) {
   return {
     getFrom: () => from,
     getSubject: () => subject,
@@ -191,7 +335,9 @@ function createMockMessage({ from, subject, date, body, unread = false, attachme
     isUnread: () => unread,
     markRead: () => {},
     getAttachments: () => attachments,
-    reply: () => {}
+    reply: (body, opts) => {
+      if (onReply) onReply({ body, opts });
+    }
   };
 }
 
@@ -250,13 +396,17 @@ function handleGmail(command, args, body, envelope, filesFolder, outbox, config)
     return `thread_id: ${threadId}\n\n--- test (2026-01-01T00:00:00.000Z) ---\nhello`;
   }
   if (command === '/send' || command === '/reply') {
+    const attachments = [];
+    const { remainingArgs, opts } = buildMailOpts(body, args, config, attachments);
     if (command === '/reply') {
-      const replyThreadId = args[0];
+      const replyThreadId = remainingArgs[0];
       if (!replyThreadId) return 'error: /reply requires a thread_id';
-      return `replied to thread ${replyThreadId}`;
+      const mode = opts.htmlBody ? ' (html)' : '';
+      return `replied to thread ${replyThreadId}${mode}`;
     }
-    if (args.length < 2) return 'error: /send <to> <subject>';
-    return `sent to ${args[0]}: ${args.slice(1).join(' ')}`;
+    if (remainingArgs.length < 2) return 'error: /send <to> <subject>';
+    const mode = opts.htmlBody ? ' (html)' : '';
+    return `sent to ${remainingArgs[0]}: ${remainingArgs.slice(1).join(' ')}${mode}`;
   }
   return `unknown: ${command}\navailable: /check, /search, /read, /send, /reply`;
 }
@@ -642,6 +792,148 @@ function handleCalendar(command, args) {
   assertEqual(parseInterval(null), 5, 'triggerConfig: null defaults to 5');
   assertEqual(parseInterval('3'), 5, 'triggerConfig: invalid falls back to 5');
   assertEqual(parseInterval('abc'), 5, 'triggerConfig: NaN falls back to 5');
+})();
+
+// --- detectMarkdown() ---
+
+(() => {
+  assert(!detectMarkdown(''), 'detectMarkdown: empty body');
+  assert(!detectMarkdown('plain text only'), 'detectMarkdown: plain text');
+  assert(detectMarkdown('Please review the **API changes**'), 'detectMarkdown: bold');
+  assert(detectMarkdown('- item one\n- item two'), 'detectMarkdown: list');
+  assert(detectMarkdown('# Heading'), 'detectMarkdown: heading');
+  assert(detectMarkdown('[docs](https://example.com)'), 'detectMarkdown: link');
+  assert(detectMarkdown('use `code` here'), 'detectMarkdown: inline code');
+  assert(detectMarkdown('```\ncode block\n```'), 'detectMarkdown: fence');
+})();
+
+(() => {
+  const body = 'New reply\n\n**Important**\n\nOn Jan 1, 2026, alice@example.com wrote:\n> old quote';
+  assert(detectMarkdown(body), 'detectMarkdown: detects before quote block');
+  const quotedOnly = 'Thanks!\n\nOn Jan 1, 2026, bob@example.com wrote:\n**quoted bold**';
+  assert(!detectMarkdown(quotedOnly), 'detectMarkdown: ignores markers inside quote block');
+})();
+
+// --- parseMarkdownFlags() ---
+
+(() => {
+  const r = parseMarkdownFlags(['--markdown', 'a@b.com', 'Hi']);
+  assertEqual(r.markdownMode, 'force', 'parseMarkdownFlags: --markdown');
+  assertDeepEqual(r.remainingArgs, ['a@b.com', 'Hi'], 'parseMarkdownFlags: strips flag');
+})();
+
+(() => {
+  const r = parseMarkdownFlags(['--no-markdown', 'thread1']);
+  assertEqual(r.markdownMode, 'disable', 'parseMarkdownFlags: --no-markdown');
+  assertDeepEqual(r.remainingArgs, ['thread1'], 'parseMarkdownFlags: strips no-markdown');
+})();
+
+// --- effectiveMarkdownMode() ---
+
+(() => {
+  const cfg = { markdownAuto: false };
+  assertEqual(effectiveMarkdownMode(null, cfg), 'disable', 'effectiveMarkdownMode: opt-out via config');
+  assertEqual(effectiveMarkdownMode('force', cfg), 'force', 'effectiveMarkdownMode: force wins');
+  assertEqual(effectiveMarkdownMode('disable', { markdownAuto: true }), 'disable', 'effectiveMarkdownMode: disable wins');
+  assertEqual(effectiveMarkdownMode(null, { markdownAuto: true }), 'auto', 'effectiveMarkdownMode: auto by default');
+})();
+
+// --- sanitizeHtml() ---
+
+(() => {
+  const clean = sanitizeHtml('<p>ok</p><script>alert(1)</script>');
+  assert(clean.includes('<p>ok</p>'), 'sanitizeHtml: keeps safe tags');
+  assert(!clean.includes('script'), 'sanitizeHtml: removes script');
+})();
+
+(() => {
+  const clean = sanitizeHtml('<a href="https://example.com">link</a>');
+  assert(clean.includes('href="https://example.com"'), 'sanitizeHtml: https link');
+  const bad = sanitizeHtml('<a href="javascript:alert(1)">x</a>');
+  assert(!bad.includes('<a'), 'sanitizeHtml: blocks javascript href');
+  const img = sanitizeHtml('<img src="https://example.com/x.png">');
+  assert(!img.includes('<img'), 'sanitizeHtml: strips img');
+})();
+
+// --- buildHtmlBody() ---
+
+(() => {
+  const cfg = { markdownAuto: false };
+  assertEqual(buildHtmlBody('plain text', 'disable', cfg), null, 'buildHtmlBody: disabled');
+  assertEqual(buildHtmlBody('plain text', 'auto', cfg), null, 'buildHtmlBody: auto off, plain text');
+  const html = buildHtmlBody('**bold** text', 'force', cfg);
+  assert(html && html.includes('<strong>'), 'buildHtmlBody: force converts bold');
+})();
+
+(() => {
+  const cfg = { markdownAuto: true };
+  const html = buildHtmlBody('- one\n- two', 'auto', cfg);
+  assert(html && html.includes('<li>'), 'buildHtmlBody: auto converts list');
+})();
+
+// --- buildMailOpts() / route send+reply ---
+
+(() => {
+  const cfg = { capabilities: ['gmail'], markdownAuto: false };
+  const outbox = createMockOutbox();
+  const filesFolder = createMockFilesFolder();
+  const result = routeMessage(
+    { to: 'my-email', content: '/send --markdown alice@example.com Hello\n**bold**' },
+    cfg, filesFolder, outbox
+  );
+  assert(result.includes('(html)'), 'route: /send --markdown adds html mode');
+})();
+
+(() => {
+  const cfg = { capabilities: ['gmail'], markdownAuto: true };
+  const outbox = createMockOutbox();
+  const filesFolder = createMockFilesFolder();
+  const result = routeMessage(
+    { to: 'my-email', content: '/reply --no-markdown thread1\n**no html**' },
+    cfg, filesFolder, outbox
+  );
+  assertEqual(result, 'replied to thread thread1', 'route: /reply --no-markdown stays plain');
+})();
+
+(() => {
+  const cfg = { capabilities: ['gmail'], markdownAuto: true };
+  const outbox = createMockOutbox();
+  const filesFolder = createMockFilesFolder();
+  const result = routeMessage(
+    { to: 'my-email', content: '/send alice@example.com Hi\n**bold** item' },
+    cfg, filesFolder, outbox
+  );
+  assert(result.includes('(html)'), 'route: auto-detect bold markdown');
+})();
+
+// --- transaction log formatters ---
+
+(() => {
+  assertEqual(toLogAction('/send'), 'a8s.send', 'toLogAction: /send');
+  assertEqual(toLogAction('/reply'), 'a8s.reply', 'toLogAction: /reply');
+})();
+
+(() => {
+  const parsed = parseCommand('/send alice@example.com Hello World\nbody');
+  const params = formatCommandParams(parsed, { from: 'my-agent' });
+  assert(params.includes('from=my-agent'), 'formatCommandParams: from');
+  assert(params.includes('to=alice@example.com'), 'formatCommandParams: to');
+  assert(params.includes('subject'), 'formatCommandParams: subject');
+})();
+
+(() => {
+  const parsed = parseCommand('/send --markdown bob@example.com Hi\n**bold**');
+  const params = formatCommandParams(parsed, { from: 'agent' });
+  assert(params.includes('--markdown'), 'formatCommandParams: markdown flag');
+  const notes = formatMarkdownLogNotes('**bold**', parsed.args, { markdownAuto: true }, true);
+  assert(notes.includes('md=detected'), 'formatMarkdownLogNotes: detected');
+  assert(notes.includes('html=yes'), 'formatMarkdownLogNotes: html sent');
+  assert(notes.includes('mode=force'), 'formatMarkdownLogNotes: force mode');
+})();
+
+(() => {
+  assertEqual(formatLogStatus('sent to a: b (html)'), 'ok', 'formatLogStatus: ok');
+  assertEqual(formatLogStatus('error: missing thread_id'), 'error: missing thread_id', 'formatLogStatus: error');
 })();
 
 // --- Report ---
