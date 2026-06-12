@@ -25,7 +25,8 @@ const A8S = (() => {
       rootFolderId: props.getProperty('A8S_ROOT_FOLDER_ID'),
       participant: props.getProperty('A8S_PARTICIPANT') || '',
       capabilities: caps,
-      triggerMinutes
+      triggerMinutes,
+      markdownAuto: (props.getProperty('MARKDOWN_AUTO') || '').toLowerCase() !== 'false'
     };
   }
 
@@ -119,9 +120,320 @@ const A8S = (() => {
     return resp.getContentText();
   }
 
+  // --- Markdown email helpers (marked loaded from vendor/marked.js) ---
+
+  const MAX_HTML_BODY_BYTES = 200 * 1024;
+
+  const ALLOWED_HTML_TAGS = {
+    a: true, b: true, blockquote: true, br: true, code: true, em: true,
+    h1: true, h2: true, h3: true, h4: true, h5: true, h6: true, hr: true,
+    i: true, li: true, ol: true, p: true, pre: true, strong: true, ul: true
+  };
+
+  const MD_PATTERNS = [
+    /^#{1,6}\s/m,
+    /^[-*]\s/m,
+    /^\d+\.\s/m,
+    /\*\*[^*\n]+\*\*/,
+    /\*[^*\n]+\*/,
+    /_[^_\n]+_/,
+    /`[^`\n]+`/,
+    /\[[^\]]+\]\(https?:\/\/[^)]+\)/,
+    /^```/m
+  ];
+
+  function bodyForMarkdownDetection(body) {
+    const lines = body.split('\n');
+    const idx = lines.findIndex(l => /^On .+ wrote:\s*$/i.test(l.trim()));
+    if (idx === -1) return body;
+    return lines.slice(0, idx).join('\n');
+  }
+
+  function detectMarkdown(body) {
+    if (!body || !body.trim()) return false;
+    const scan = bodyForMarkdownDetection(body);
+    return MD_PATTERNS.some(re => re.test(scan));
+  }
+
+  function parseMarkdownFlags(args) {
+    let markdownMode = null;
+    const remaining = [];
+    args.forEach(a => {
+      if (a === '--markdown') markdownMode = 'force';
+      else if (a === '--no-markdown') markdownMode = 'disable';
+      else remaining.push(a);
+    });
+    return { remainingArgs: remaining, markdownMode };
+  }
+
+  function effectiveMarkdownMode(flagMode, config) {
+    if (flagMode === 'force') return 'force';
+    if (flagMode === 'disable') return 'disable';
+    return config.markdownAuto ? 'auto' : 'disable';
+  }
+
+  function sanitizeHtml(html) {
+    if (!html) return '';
+    let out = html.replace(/<script\b[\s\S]*?<\/script>/gi, '');
+    out = out.replace(/<style\b[\s\S]*?<\/style>/gi, '');
+    out = out.replace(/<!--[\s\S]*?-->/g, '');
+    out = out.replace(/<\/?([a-zA-Z][a-zA-Z0-9]*)\b([^>]*)>/g, (match, tag, attrs) => {
+      const t = tag.toLowerCase();
+      if (match.charAt(1) === '/') {
+        return ALLOWED_HTML_TAGS[t] ? `</${t}>` : '';
+      }
+      if (!ALLOWED_HTML_TAGS[t]) return '';
+      if (t === 'br' || t === 'hr') return `<${t}>`;
+      if (t === 'a') {
+        const hrefMatch = attrs.match(/\bhref\s*=\s*("([^"]*)"|'([^']*)'|([^\s>]+))/i);
+        const href = (hrefMatch && (hrefMatch[2] || hrefMatch[3] || hrefMatch[4] || '')).trim();
+        if (!/^https?:\/\//i.test(href) && !/^mailto:/i.test(href)) return '';
+        const safe = href.replace(/"/g, '&quot;').replace(/javascript:/gi, '');
+        return `<a href="${safe}">`;
+      }
+      return `<${t}>`;
+    });
+    return out.replace(/javascript:/gi, '');
+  }
+
+  function buildHtmlBody(body, markdownMode, config) {
+    if (!body || markdownMode === 'disable') return null;
+    const shouldConvert = markdownMode === 'force' ||
+      (markdownMode === 'auto' && detectMarkdown(body));
+    if (!shouldConvert) return null;
+    if (typeof marked === 'undefined') return null;
+    try {
+      let html = marked.parse(body, { breaks: true });
+      html = sanitizeHtml(html);
+      if (!html) return null;
+      if (Utilities.newBlob(html).getBytes().length > MAX_HTML_BODY_BYTES) return null;
+      return html;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  function buildMailOpts(body, args, config, attachments) {
+    const { remainingArgs, markdownMode: flagMode } = parseMarkdownFlags(args);
+    const opts = {};
+    if (attachments.length) opts.attachments = attachments;
+    const html = buildHtmlBody(body, effectiveMarkdownMode(flagMode, config), config);
+    if (html) opts.htmlBody = html;
+    return { opts, remainingArgs };
+  }
+
+  function formatMarkdownLogNotes(body, args, config, htmlSent) {
+    const { markdownMode: flagMode } = parseMarkdownFlags(args || []);
+    const mode = effectiveMarkdownMode(flagMode, config);
+    const detected = detectMarkdown(body || '');
+    return `mode=${mode}, md=${detected ? 'detected' : 'no'}, html=${htmlSent ? 'yes' : 'no'}`;
+  }
+
+  function toLogAction(command) {
+    return 'a8s' + command.replace('/', '.');
+  }
+
+  function formatCommandParams(parsed, envelope) {
+    const parts = [`from=${envelope.from || ''}`];
+    const { remainingArgs } = parseMarkdownFlags(parsed.args);
+    if (parsed.args.includes('--markdown')) parts.push('--markdown');
+    if (parsed.args.includes('--no-markdown')) parts.push('--no-markdown');
+    if (parsed.command === '/send') {
+      if (remainingArgs[0]) parts.push(`to=${remainingArgs[0]}`);
+      if (remainingArgs.length > 1) parts.push('subject');
+    } else if (parsed.command === '/reply') {
+      if (remainingArgs[0]) parts.push(`thread_id=${remainingArgs[0]}`);
+    } else if (parsed.command === '/read') {
+      if (remainingArgs[0]) parts.push(`thread_id=${remainingArgs[0]}`);
+    } else if (parsed.command === '/search') {
+      parts.push('query');
+    } else if (parsed.command === '/create') {
+      parts.push('title, datetime');
+    }
+    return parts.join(', ');
+  }
+
+  function formatLogStatus(response) {
+    const text = String(response);
+    if (text.startsWith('error:')) return text;
+    if (text.startsWith('unknown:')) return 'error: ' + text.split('\n')[0];
+    if (text.startsWith('rejected:')) return text;
+    return 'ok';
+  }
+
+  // --- Transaction logging (same format as GAS Bridge) ---
+
+  function _loggingEnabled() {
+    return PropertiesService.getScriptProperties().getProperty('LOGGING_ENABLED') === 'true';
+  }
+
+  function _pruneStaleLogProperties() {
+    const props = PropertiesService.getScriptProperties();
+    const today = Utilities.formatDate(new Date(), 'UTC', 'yyyy-MM-dd');
+    if (props.getProperty('_a8s_log_prune_date') === today) return;
+
+    const cutoff = new Date();
+    cutoff.setUTCDate(cutoff.getUTCDate() - 7);
+    const cutoffStr = Utilities.formatDate(cutoff, 'UTC', 'yyyy-MM-dd');
+
+    const all = props.getProperties();
+    Object.keys(all).forEach(k => {
+      const m = k.match(/^_log_sheet_(\d{4}-\d{2}-\d{2})$/);
+      if (m && m[1] < cutoffStr) props.deleteProperty(k);
+    });
+    props.setProperty('_a8s_log_prune_date', today);
+  }
+
+  function _getOrCreateLogSheet(today) {
+    const sheetName = 'GAS Log ' + today;
+    const propKey = '_log_sheet_' + today;
+    const props = PropertiesService.getScriptProperties();
+    let ssId = props.getProperty(propKey);
+
+    if (ssId) {
+      try {
+        return SpreadsheetApp.openById(ssId).getActiveSheet();
+      } catch (e) {
+        ssId = null;
+      }
+    }
+
+    const files = DriveApp.getFilesByName(sheetName);
+    while (files.hasNext()) {
+      const f = files.next();
+      if (f.getMimeType() === MimeType.GOOGLE_SHEETS) {
+        ssId = f.getId();
+        props.setProperty(propKey, ssId);
+        return SpreadsheetApp.openById(ssId).getActiveSheet();
+      }
+    }
+
+    const ss = SpreadsheetApp.create(sheetName);
+    const sheet = ss.getActiveSheet();
+    sheet.appendRow(['Timestamp', 'Action', 'Params', 'Status', 'Notes']);
+    props.setProperty(propKey, ss.getId());
+    return sheet;
+  }
+
+  function _logHasNotesColumn(sheet) {
+    if (sheet.getLastRow() === 0) return true;
+    return sheet.getRange(1, 5).getValue() === 'Notes';
+  }
+
+  function _logTransaction(action, params, status, notes) {
+    if (!_loggingEnabled()) return;
+    try {
+      _pruneStaleLogProperties();
+      const today = Utilities.formatDate(new Date(), 'UTC', 'yyyy-MM-dd');
+      const sheet = _getOrCreateLogSheet(today);
+      const row = [new Date().toISOString(), action, params, status];
+      if (_logHasNotesColumn(sheet)) {
+        row.push(notes || '');
+      } else if (notes) {
+        row[3] = status + '; ' + notes;
+      }
+      sheet.appendRow(row);
+    } catch (e) { /* logging must NEVER break the actual request */ }
+  }
+
+  function enableLogging() {
+    PropertiesService.getScriptProperties().setProperty('LOGGING_ENABLED', 'true');
+    Logger.log('Request logging ENABLED. Logs written to "GAS Log YYYY-MM-DD" spreadsheets.');
+  }
+
+  function disableLogging() {
+    PropertiesService.getScriptProperties().deleteProperty('LOGGING_ENABLED');
+    Logger.log('Request logging DISABLED.');
+  }
+
+  function debugMarkdownPipeline(body, args) {
+    const config = getConfig();
+    const { remainingArgs, markdownMode: flagMode } = parseMarkdownFlags(args || []);
+    const effectiveMode = effectiveMarkdownMode(flagMode, config);
+    const detected = detectMarkdown(body || '');
+    const markedAvailable = typeof marked !== 'undefined';
+    const scanText = bodyForMarkdownDetection(body || '');
+    const diag = {
+      configMarkdownAuto: config.markdownAuto,
+      flagMode,
+      effectiveMode: effectiveMode,
+      detected,
+      scanTextPreview: scanText.substring(0, 120),
+      markedAvailable,
+      parseError: null,
+      rawHtmlLength: 0,
+      sanitizedLength: 0,
+      tooLarge: false,
+      htmlBodyLength: 0,
+      willSendHtml: false,
+      rawHtmlPreview: null,
+      sanitizedPreview: null,
+      remainingArgs
+    };
+
+    if (!markedAvailable) return diag;
+
+    try {
+      const shouldConvert = effectiveMode === 'force' ||
+        (effectiveMode === 'auto' && detected);
+      if (!shouldConvert || !body) return diag;
+
+      const rawHtml = marked.parse(body, { breaks: true });
+      const sanitized = sanitizeHtml(rawHtml);
+      const htmlBody = buildHtmlBody(body, effectiveMode, config);
+
+      diag.rawHtmlLength = rawHtml.length;
+      diag.sanitizedLength = sanitized.length;
+      diag.tooLarge = sanitized.length > 0 &&
+        Utilities.newBlob(sanitized).getBytes().length > MAX_HTML_BODY_BYTES;
+      diag.htmlBodyLength = htmlBody ? htmlBody.length : 0;
+      diag.willSendHtml = !!htmlBody;
+      diag.rawHtmlPreview = rawHtml.substring(0, 300);
+      diag.sanitizedPreview = sanitized.substring(0, 300);
+    } catch (e) {
+      diag.parseError = e.message;
+    }
+
+    return diag;
+  }
+
+  function testMarkdownDetection() {
+    const samples = [
+      ['plain text only', false],
+      ['Please review the **API changes**', true],
+      ['- item one\n- item two', true],
+      ['# Heading', true],
+      ['use `code` here', true],
+      ['[link](https://example.com)', true]
+    ];
+    Logger.log('=== Markdown detection ===');
+    Logger.log(`markdownAuto default: ${getConfig().markdownAuto}`);
+    Logger.log(`marked available: ${typeof marked !== 'undefined'}`);
+    samples.forEach(([text, expect]) => {
+      const got = detectMarkdown(text);
+      Logger.log(`${got === expect ? 'OK' : 'FAIL'} detectMarkdown(${JSON.stringify(text)}) => ${got} (expected ${expect})`);
+    });
+  }
+
+  function testMarkdownPipeline() {
+    const body = 'Please review the **API changes** below:\n\n- Add /users endpoint\n- Remove legacy field';
+    Logger.log('=== Markdown pipeline (sample body) ===');
+    Logger.log(JSON.stringify(debugMarkdownPipeline(body, []), null, 2));
+
+    const content = `/send you@example.com Pipeline test\n${body}`;
+    const parsed = parseCommand(content);
+    Logger.log('=== Markdown pipeline (/send parseCommand) ===');
+    Logger.log(JSON.stringify(debugMarkdownPipeline(parsed.body, parsed.args), null, 2));
+  }
+
+  function testMarkdown() {
+    testMarkdownDetection();
+    testMarkdownPipeline();
+  }
+
   // --- Gmail Handler ---
 
-  function handleGmail(command, args, body, envelope, filesFolder, outbox, config) {
+  function handleGmail(command, args, body, envelope, filesFolder, outbox, config, logCtx) {
     if (command === '/check') {
       const threads = GmailApp.search('is:unread', 0, 5);
       const subjects = threads.map(t => {
@@ -160,30 +472,32 @@ const A8S = (() => {
     }
 
     if (command === '/send' || command === '/reply') {
+      const attachments = collectFileAttachments(envelope, filesFolder);
+      const { remainingArgs, opts: mailOpts } = buildMailOpts(body, args, config, attachments);
+      if (logCtx) {
+        logCtx.notes = formatMarkdownLogNotes(body, args, config, !!mailOpts.htmlBody);
+      }
+
       if (command === '/reply') {
-        const replyThreadId = args[0];
+        const replyThreadId = remainingArgs[0];
         if (!replyThreadId) return 'error: /reply requires a thread_id';
         try {
           const replyThread = GmailApp.getThreadById(replyThreadId);
           const lastMsg = replyThread.getMessages()[replyThread.getMessageCount() - 1];
-          const attachments = collectFileAttachments(envelope, filesFolder);
-          const opts = {};
-          if (attachments.length) opts.attachments = attachments;
-          lastMsg.reply(body || '', opts);
-          return `replied to thread ${replyThreadId}`;
+          lastMsg.reply(body || '', mailOpts);
+          const mode = mailOpts.htmlBody ? ' (html)' : '';
+          return `replied to thread ${replyThreadId}${mode}`;
         } catch (e) {
           return `error: ${e.message}`;
         }
       }
 
-      if (args.length < 2) return 'error: /send <to> <subject>';
-      const to = args[0];
-      const subject = args.slice(1).join(' ');
-      const attachments = collectFileAttachments(envelope, filesFolder);
-      const opts = {};
-      if (attachments.length) opts.attachments = attachments;
-      GmailApp.sendEmail(to, subject, body || '', opts);
-      return `sent to ${to}: ${subject}`;
+      if (remainingArgs.length < 2) return 'error: /send <to> <subject>';
+      const to = remainingArgs[0];
+      const subject = remainingArgs.slice(1).join(' ');
+      GmailApp.sendEmail(to, subject, body || '', mailOpts);
+      const mode = mailOpts.htmlBody ? ' (html)' : '';
+      return `sent to ${to}: ${subject}${mode}`;
     }
 
     return `unknown: ${command}\navailable: /check, /search, /read, /send, /reply`;
@@ -205,11 +519,12 @@ const A8S = (() => {
   // --- Email Push (UNREAD → mark READ → tell agent) ---
 
   function pushNewEmails(config, outbox, filesFolder) {
-    if (!config.participant || !config.capabilities.includes('gmail')) return;
+    if (!config.participant || !config.capabilities.includes('gmail')) return 0;
 
     const threads = GmailApp.search('is:unread', 0, 10);
-    if (!threads.length) return;
+    if (!threads.length) return 0;
 
+    let count = 0;
     threads.forEach(thread => {
       const messages = thread.getMessages();
       const unread = messages.filter(m => m.isUnread());
@@ -219,8 +534,10 @@ const A8S = (() => {
         const files = saveAttachmentsToFiles(msg, filesFolder);
         writeEnvelope(outbox, config.participant, content, files);
         msg.markRead();
+        count++;
       });
     });
+    return count;
   }
 
   function formatEmailForAgent(msg, threadId) {
@@ -322,17 +639,18 @@ const A8S = (() => {
   }
 
   function pushUpcomingEvents(config, outbox, filesFolder) {
-    if (!config.participant || !config.capabilities.includes('calendar')) return;
+    if (!config.participant || !config.capabilities.includes('calendar')) return 0;
 
     const cal = CalendarApp.getDefaultCalendar();
     const now = new Date();
     const soon = new Date(now.getTime() + 15 * 60000);
     const events = cal.getEvents(now, soon);
-    if (!events.length) return;
+    if (!events.length) return 0;
 
     const props = PropertiesService.getScriptProperties();
     const notifiedKey = '_a8s_notified_events';
     const notified = JSON.parse(props.getProperty(notifiedKey) || '{}');
+    let count = 0;
 
     events.forEach(ev => {
       const start = ev.getStartTime();
@@ -341,6 +659,7 @@ const A8S = (() => {
         const { content, files } = formatEventForAgent(ev, filesFolder);
         writeEnvelope(outbox, config.participant, content, files);
         notified[key] = now.toISOString();
+        count++;
       }
     });
 
@@ -349,6 +668,7 @@ const A8S = (() => {
       if (new Date(notified[id]).getTime() < cutoff) delete notified[id];
     }
     props.setProperty(notifiedKey, JSON.stringify(notified));
+    return count;
   }
 
   // --- Calendar Handler ---
@@ -413,21 +733,34 @@ const A8S = (() => {
 
   function routeMessage(envelope, config, filesFolder, outbox) {
     const parsed = parseCommand(envelope.content || '');
-    if (!parsed) return 'error: message must start with a /command';
+    if (!parsed) {
+      _logTransaction('a8s.command', `from=${envelope.from || ''}`, 'error: not a command', '');
+      return 'error: message must start with a /command';
+    }
 
+    const logParams = formatCommandParams(parsed, envelope);
+    const logCtx = {};
     const { command } = parsed;
+    let response;
 
     if (GMAIL_COMMANDS.includes(command)) {
-      if (!config.capabilities.includes('gmail')) return `error: gmail capability not enabled`;
-      return handleGmail(parsed.command, parsed.args, parsed.body, envelope, filesFolder, outbox, config);
+      if (!config.capabilities.includes('gmail')) {
+        response = 'error: gmail capability not enabled';
+      } else {
+        response = handleGmail(parsed.command, parsed.args, parsed.body, envelope, filesFolder, outbox, config, logCtx);
+      }
+    } else if (CALENDAR_COMMANDS.includes(command)) {
+      if (!config.capabilities.includes('calendar')) {
+        response = 'error: calendar capability not enabled';
+      } else {
+        response = handleCalendar(parsed.command, parsed.args);
+      }
+    } else {
+      response = `error: unknown command "${command}"\navailable: ${GMAIL_COMMANDS.concat(CALENDAR_COMMANDS).join(', ')}`;
     }
 
-    if (CALENDAR_COMMANDS.includes(command)) {
-      if (!config.capabilities.includes('calendar')) return `error: calendar capability not enabled`;
-      return handleCalendar(parsed.command, parsed.args);
-    }
-
-    return `error: unknown command "${command}"\navailable: ${GMAIL_COMMANDS.concat(CALENDAR_COMMANDS).join(', ')}`;
+    _logTransaction(toLogAction(command), logParams, formatLogStatus(response), logCtx.notes || '');
+    return response;
   }
 
   // --- Main Trigger ---
@@ -460,27 +793,37 @@ const A8S = (() => {
         const envelope = JSON.parse(file.getBlob().getDataAsString());
         if (config.participant && envelope.from !== config.participant) {
           console.log(`rejected message from "${envelope.from}" (authorized: ${config.participant})`);
+          _logTransaction('a8s.command', `from=${envelope.from || ''}`, 'rejected: unauthorized', '');
         } else {
           const response = routeMessage(envelope, config, filesFolder, outbox);
           writeEnvelope(outbox, config.participant, response);
         }
       } catch (e) {
         console.log(`error processing ${file.getName()}: ${e.message}`);
+        _logTransaction('a8s.command', file.getName(), 'error: ' + e.message, '');
       }
 
       file.setTrashed(true);
     }
 
     try {
-      pushNewEmails(config, outbox, filesFolder);
+      const emailCount = pushNewEmails(config, outbox, filesFolder);
+      if (emailCount > 0) {
+        _logTransaction('a8s.push.email', `to=${config.participant}`, `ok (${emailCount} messages)`, '');
+      }
     } catch (e) {
       console.log(`email push failed: ${e.message}`);
+      _logTransaction('a8s.push.email', `to=${config.participant}`, 'error: ' + e.message, '');
     }
 
     try {
-      pushUpcomingEvents(config, outbox, filesFolder);
+      const eventCount = pushUpcomingEvents(config, outbox, filesFolder);
+      if (eventCount > 0) {
+        _logTransaction('a8s.push.calendar', `to=${config.participant}`, `ok (${eventCount} events)`, '');
+      }
     } catch (e) {
       console.log(`calendar push failed: ${e.message}`);
+      _logTransaction('a8s.push.calendar', `to=${config.participant}`, 'error: ' + e.message, '');
     }
   }
 
@@ -494,6 +837,8 @@ const A8S = (() => {
       Logger.log('  A8S_PARTICIPANT — who to push notifications to (e.g. "my-agent")');
       Logger.log('  CAPABILITIES — comma-delimited list (e.g. "gmail,calendar")');
       Logger.log('  TRIGGER_MINUTES — trigger interval: 1, 5, 10, 15, or 30 (default: 5)');
+      Logger.log('  MARKDOWN_AUTO — set to "false" to disable auto Markdown detection (default: on)');
+      Logger.log('Run enableLogging() to log transactions to "GAS Log YYYY-MM-DD" sheets (same as GAS Bridge).');
       return;
     }
     Logger.log('Configuration OK. Run installTrigger() to activate.');
@@ -531,6 +876,9 @@ const A8S = (() => {
       Logger.log(`Participant: ${config.participant || '(not set)'}`);
       Logger.log(`Capabilities: ${config.capabilities.join(', ') || '(none)'}`);
       Logger.log(`Trigger interval: ${config.triggerMinutes} minutes`);
+      Logger.log(`Markdown auto-detect: ${config.markdownAuto ? 'on' : 'off (MARKDOWN_AUTO=false)'}`);
+      Logger.log(`Transaction logging: ${_loggingEnabled() ? 'on' : 'off (run enableLogging())'}`);
+      Logger.log(`marked global: ${typeof marked !== 'undefined' ? 'available' : 'MISSING — check vendor/marked.js'}`);
       Logger.log('OK');
     } catch (e) {
       Logger.log(`ERROR: ${e.message}`);
@@ -543,7 +891,19 @@ const A8S = (() => {
     installTrigger,
     removeTrigger,
     testConnection,
-    _testing: { ulid, parseCommand, formatEmailForAgent, formatEventForAgent, writeEnvelope, routeMessage, pad, extractDriveLinks, exportDocAsMarkdown, downloadDriveFile, hashPrefix, getConfig }
+    testMarkdown,
+    testMarkdownDetection,
+    testMarkdownPipeline,
+    debugMarkdownPipeline,
+    enableLogging,
+    disableLogging,
+    _testing: {
+      ulid, parseCommand, formatEmailForAgent, formatEventForAgent, writeEnvelope, routeMessage,
+      pad, extractDriveLinks, exportDocAsMarkdown, downloadDriveFile, hashPrefix, getConfig,
+      detectMarkdown, bodyForMarkdownDetection, parseMarkdownFlags, effectiveMarkdownMode,
+      sanitizeHtml, buildHtmlBody, buildMailOpts, formatMarkdownLogNotes, formatCommandParams,
+      formatLogStatus, toLogAction
+    }
   };
 
 })();
@@ -553,3 +913,8 @@ function setup()          { A8S.setup(); }
 function installTrigger() { A8S.installTrigger(); }
 function removeTrigger()  { A8S.removeTrigger(); }
 function testConnection() { A8S.testConnection(); }
+function testMarkdown() { A8S.testMarkdown(); }
+function testMarkdownDetection() { A8S.testMarkdownDetection(); }
+function testMarkdownPipeline() { A8S.testMarkdownPipeline(); }
+function enableLogging() { A8S.enableLogging(); }
+function disableLogging() { A8S.disableLogging(); }

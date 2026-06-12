@@ -1,0 +1,15 @@
+{
+  "name": "a8s-gas",
+  "private": true,
+  "description": "A8S Google Apps Script participant",
+  "scripts": {
+    "vendor": "node scripts/vendor-marked.mjs",
+    "prepush": "npm run vendor"
+  },
+  "dependencies": {
+    "marked": "^15.0.12"
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.1"
+  }
+}
