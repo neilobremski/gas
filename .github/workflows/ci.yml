@@ -1,0 +1,35 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  pii-check:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Check for PII in diff
+        env:
+          PII_PATTERNS: ${{ secrets.PII_PATTERNS }}
+        run: python3 .github/pii_check.py
+
+  a8s:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Run a8s tests
+        working-directory: a8s
+        run: |
+          npm ci
+          npm run vendor
+          tests/run
+      - name: PII check unit tests
+        run: python3 tests/test_pii.py

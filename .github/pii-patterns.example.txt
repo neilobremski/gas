@@ -1,0 +1,22 @@
+# PII patterns — example only (safe to commit).
+#
+# Setup (local):
+#   cp .github/pii-patterns.example.txt .github/pii-patterns.local.txt
+#   edit .github/pii-patterns.local.txt with your real patterns (gitignored)
+#   ./install-hooks.sh
+#
+# Setup (GitHub Actions):
+#   Repository secret PII_PATTERNS — same format, one regex per line.
+#   After editing the local file: .github/sync-pii-patterns.sh
+#
+# Enforced by .github/pii_check.py (pre-push hook + CI).
+
+# Private names — replace with your own in the local copy
+example-agent-name
+
+# Infrastructure — replace with your own
+example-hostname
+example\.host\.example
+
+# Credentials patterns — replace with your own
+example.*env
