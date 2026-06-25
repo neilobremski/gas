@@ -11,9 +11,12 @@ A8S server (rclone mount) ←→ Google Drive folder ←→ GAS (time trigger)
 Drive folder layout:
 ```
 <root>/
-  .inbox/     ← A8S writes here; GAS reads + deletes after processing
-  .outbox/    ← GAS writes responses here; A8S picks up
-  .files/     ← bidirectional attachments (A8S handles tempfile.org for cross-cluster)
+  .inbox/              ← A8S writes here; GAS reads + deletes after processing
+  .outbox/
+    <msg_id>.json      ← GAS writes envelopes; A8S ingests
+    <msg_id>/          ← outbound attachment bundles (GAS → recipient)
+  .files/
+    <msg_id>/          ← inbound attachments (A8S → GAS, e.g. tell --attach)
 ```
 
 ## Project files
@@ -88,12 +91,12 @@ a8s add my-google /mnt/gdrive/my-google/ file-proxy.json
 
 Every trigger cycle, checks for **unread** emails:
 1. Marks each as READ
-2. Saves attachments to `.files/`
+2. Stages attachments under `.outbox/<msg_id>/` (a8s bundle layout)
 3. Pushes an envelope per message to `A8S_PARTICIPANT` with:
    - `thread_id` (for replying in the same thread)
    - `from`, `subject`, `date`
    - Email body (truncated at 4KB)
-   - `FILE:` references for attachments
+   - `files: [{filename}]` (filename only — no `path` field)
 
 **Re-push:** Mark an email as UNREAD in Gmail → next trigger picks it up again.
 
@@ -124,8 +127,8 @@ Recurring calendar events drive an agent's schedule without needing idle timeout
 ### Drive file attachments
 
 Files attached to calendar events (via Calendar Advanced Service) or linked in the description are:
-- Downloaded to `.files/`
-- Referenced as `FILE:` entries in the envelope
+- Staged under `.outbox/<msg_id>/` when the push envelope is written
+- Listed in the envelope as `files: [{filename}]` (filename only)
 - Google Docs exported as markdown (`.md`)
 - Google Sheets exported as CSV (`.csv`)
 - Other files downloaded as-is
@@ -143,8 +146,8 @@ Events are deduped by `eventId@startTime`. Rescheduling an event re-triggers the
 | `/check` | Unread count + last 5 subjects with thread IDs |
 | `/search <query>` | Gmail search, returns thread IDs + subjects |
 | `/read <thread_id>` | Full thread text |
-| `/send <to> <subject>` | Send new email (body = lines after command; FILE: for attachments) |
-| `/reply <thread_id>` | Reply to existing thread (body = lines after command) |
+| `/send <to> <subject>` | Send new email (body = lines after command; attachments via `files: [{filename}]` in inbox envelope) |
+| `/reply <thread_id>` | Reply to existing thread (body = lines after command; attachments from `.files/<msg_id>/`) |
 
 #### Markdown email
 
@@ -247,5 +250,5 @@ Run from the Apps Script editor:
 - GAS quotas: ~20,000 Drive calls/day, 1,500 Gmail reads/day
 - At 1-minute intervals: ~1,440 runs/day × ~10 Drive calls ≈ 14,000 (within quota)
 - Calendar Advanced Service required for event attachments
-- File transfer: GAS writes to `.files/`, A8S file-proxy handles tempfile.org upload
+- File transfer: outbound bundles under `.outbox/<msg_id>/`; inbound from A8S under `.files/<msg_id>/`
 - `ScriptApp.getOAuthToken()` used for Drive API export (Google Docs → markdown)

@@ -38,14 +38,38 @@ const A8S = (() => {
 
   const _logs = [];
 
-  function writeEnvelope(outbox, to, content, files) {
+  function copyFileToBundle(filesFolder, bundle, filename) {
+    if (!filesFolder || !bundle || !filename) return;
+    const iter = filesFolder.getFilesByName(filename);
+    if (!iter.hasNext()) return;
+    const src = iter.next();
+    const existing = bundle.getFilesByName(filename);
+    if (existing.hasNext()) return;
+    try {
+      src.makeCopy(filename, bundle);
+    } catch (e) {
+      bundle.createFile(filename, src.getBlob());
+    }
+  }
+
+  function writeEnvelope(outbox, to, content, files, filesFolder) {
     const envelope = {
       id: ulid(),
       date: new Date().toISOString(),
       to,
       content
     };
-    if (files && files.length) envelope.files = files;
+    if (files && files.length) {
+      const bundle = getOrCreateSubfolder(outbox, envelope.id);
+      const normalized = [];
+      files.forEach(f => {
+        const filename = (f.filename || '').trim();
+        if (!filename) return;
+        copyFileToBundle(filesFolder, bundle, filename);
+        normalized.push({ filename });
+      });
+      if (normalized.length) envelope.files = normalized;
+    }
     if (_logs.length) envelope.logs = _logs.splice(0);
     outbox.createFile(`${envelope.id}.json`, JSON.stringify(envelope, null, 2), 'application/json');
     return envelope;
@@ -89,17 +113,17 @@ const A8S = (() => {
       }
       const filename = `${prefix}-${name}.md`;
       const iter = filesFolder.getFilesByName(filename);
-      if (iter.hasNext()) return { filename, path: `./.files/${filename}` };
+      if (iter.hasNext()) return { filename };
       filesFolder.createFile(filename, content, 'text/markdown');
-      return { filename, path: `./.files/${filename}` };
+      return { filename };
     }
 
     const filename = `${prefix}-${name}`;
     const iter = filesFolder.getFilesByName(filename);
-    if (iter.hasNext()) return { filename, path: `./.files/${filename}` };
+    if (iter.hasNext()) return { filename };
     const blob = file.getBlob();
     filesFolder.createFile(blob.setName(filename));
-    return { filename, path: `./.files/${filename}` };
+    return { filename };
   }
 
   function exportDocAsMarkdown(fileId) {
@@ -506,12 +530,25 @@ const A8S = (() => {
   function collectFileAttachments(envelope, filesFolder) {
     const attachments = [];
     if (!envelope.files || !envelope.files.length) return attachments;
+    const msgId = (envelope.id || '').trim();
+    let bundle = null;
+    if (msgId) {
+      const bundleIter = filesFolder.getFoldersByName(msgId);
+      if (bundleIter.hasNext()) bundle = bundleIter.next();
+    }
     envelope.files.forEach(f => {
-      const filename = f.filename || f.path.split('/').pop();
-      const iter = filesFolder.getFilesByName(filename);
-      if (iter.hasNext()) {
-        attachments.push(iter.next().getBlob());
+      const filename = (f.filename || '').trim();
+      if (!filename) return;
+      let blob = null;
+      if (bundle) {
+        const bundleIter = bundle.getFilesByName(filename);
+        if (bundleIter.hasNext()) blob = bundleIter.next().getBlob();
       }
+      if (!blob) {
+        const iter = filesFolder.getFilesByName(filename);
+        if (iter.hasNext()) blob = iter.next().getBlob();
+      }
+      if (blob) attachments.push(blob);
     });
     return attachments;
   }
@@ -532,7 +569,7 @@ const A8S = (() => {
       unread.forEach(msg => {
         const content = formatEmailForAgent(msg, thread.getId());
         const files = saveAttachmentsToFiles(msg, filesFolder);
-        writeEnvelope(outbox, config.participant, content, files);
+        writeEnvelope(outbox, config.participant, content, files, filesFolder);
         msg.markRead();
         count++;
       });
@@ -557,7 +594,7 @@ const A8S = (() => {
     return attachments.map(att => {
       const filename = att.getName();
       filesFolder.createFile(att.copyBlob().setName(filename));
-      return { filename, path: `./.files/${filename}` };
+      return { filename };
     });
   }
 
@@ -657,7 +694,7 @@ const A8S = (() => {
       const key = `${ev.getId()}@${start.getTime()}`;
       if (!notified[key]) {
         const { content, files } = formatEventForAgent(ev, filesFolder);
-        writeEnvelope(outbox, config.participant, content, files);
+        writeEnvelope(outbox, config.participant, content, files, filesFolder);
         notified[key] = now.toISOString();
         count++;
       }
