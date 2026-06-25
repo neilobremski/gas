@@ -115,10 +115,31 @@ Mirrors GAS Bridge `_logRequest` pattern:
 
 | Component | How to test |
 |-----------|-------------|
-| A8S | `a8s/tests/run` — 132 tests, mocked Gmail/Drive/Calendar + `marked` from npm |
+| A8S | `a8s/tests/run` — 134 tests, mocked Gmail/Drive/Calendar + `marked` from npm |
 | Bridge | Manual curl / `gas` CLI against deployed instance |
 
 Add tests in `a8s/tests/test.js` using `assert` / `assertEqual`. Run before every push.
+
+## PII check
+
+Same approach as `~/bin`: `.github/pii_check.py` scans **added lines** in git diffs against regex patterns.
+
+| Context | Patterns source |
+|---------|-----------------|
+| Local pre-push | `.github/pii-patterns.local.txt` (gitignored) |
+| GitHub Actions | `PII_PATTERNS` repository secret |
+
+Setup:
+
+```bash
+cp .github/pii-patterns.example.txt .github/pii-patterns.local.txt
+./install-hooks.sh
+.github/sync-pii-patterns.sh   # after editing local patterns
+python3 tests/test_pii.py
+python3 .github/pii_check.py   # scan branch vs main
+```
+
+Use `example.com` and placeholder names in committed code — never real emails, agent names, or infrastructure hosts.
 
 ## Key APIs
 
