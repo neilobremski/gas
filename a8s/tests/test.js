@@ -267,19 +267,62 @@ function formatEventForAgent(ev, filesFolder) {
 function mockDownloadDriveFile(fileId, filesFolder) {
   const filename = `file_${fileId}.md`;
   filesFolder.createFile(filename, 'mock content', 'text/markdown');
-  return { filename, path: `./.files/${filename}` };
+  return { filename };
 }
 
-function writeEnvelope(outbox, to, content, files) {
+function createMockBundleFolder() {
+  const files = [];
+  return {
+    getFilesByName: (name) => {
+      const found = files.find(f => f.name === name);
+      return {
+        hasNext: () => !!found,
+        next: () => ({
+          getBlob: () => found.content,
+          makeCopy: (copyName, dest) => dest.createFile(copyName, found.content, found.mimeType)
+        })
+      };
+    },
+    createFile: (name, content, mimeType) => files.push({ name, content, mimeType })
+  };
+}
+
+function copyFileToBundle(filesFolder, bundle, filename) {
+  if (!filesFolder || !bundle || !filename) return;
+  const iter = filesFolder.getFilesByName(filename);
+  if (!iter.hasNext()) return;
+  const src = iter.next();
+  const existing = bundle.getFilesByName(filename);
+  if (existing.hasNext()) return;
+  bundle.createFile(filename, src.content, src.mimeType);
+}
+
+function writeEnvelope(outbox, to, content, files, filesFolder) {
   const envelope = {
     id: ulid(),
     date: new Date().toISOString(),
     to,
     content
   };
-  if (files && files.length) envelope.files = files;
+  if (files && files.length) {
+    const bundle = getOrCreateSubfolder(outbox, envelope.id);
+    const normalized = [];
+    files.forEach(f => {
+      const filename = (f.filename || '').trim();
+      if (!filename) return;
+      copyFileToBundle(filesFolder, bundle, filename);
+      normalized.push({ filename });
+    });
+    if (normalized.length) envelope.files = normalized;
+  }
   outbox.createFile(`${envelope.id}.json`, JSON.stringify(envelope, null, 2), 'application/json');
   return envelope;
+}
+
+function getOrCreateSubfolder(root, name) {
+  const iter = root.getFoldersByName(name);
+  if (iter.hasNext()) return iter.next();
+  return root.createFolder(name);
 }
 
 const GMAIL_COMMANDS = ['/check', '/search', '/read', '/send', '/reply'];
@@ -343,18 +386,46 @@ function createMockMessage({ from, subject, date, body, unread = false, attachme
 
 function createMockOutbox() {
   const files = [];
+  const subfolders = {};
   return {
     createFile: (name, content, mimeType) => files.push({ name, content, mimeType }),
-    getFiles: () => files
+    getFiles: () => files,
+    getFoldersByName: (name) => {
+      const folder = subfolders[name];
+      return { hasNext: () => !!folder, next: () => folder };
+    },
+    createFolder: (name) => {
+      const folder = createMockBundleFolder();
+      subfolders[name] = folder;
+      return folder;
+    },
+    _subfolders: subfolders
   };
 }
 
 function createMockFilesFolder() {
   const created = [];
+  const subfolders = {};
   return {
+    getFoldersByName: (name) => {
+      const folder = subfolders[name];
+      return { hasNext: () => !!folder, next: () => folder };
+    },
+    createFolder: (name) => {
+      const folder = createMockBundleFolder();
+      subfolders[name] = folder;
+      return folder;
+    },
     getFilesByName: (name) => {
       const found = created.find(f => f.name === name);
-      return { hasNext: () => !!found, next: () => found };
+      return {
+        hasNext: () => !!found,
+        next: () => ({
+          getBlob: () => found.content,
+          content: found.content,
+          mimeType: found.mimeType
+        })
+      };
     },
     createFile: (nameOrBlob, content, mimeType) => {
       const entry = typeof nameOrBlob === 'string'
@@ -363,7 +434,8 @@ function createMockFilesFolder() {
       created.push(entry);
       return entry;
     },
-    _created: created
+    _created: created,
+    _subfolders: subfolders
   };
 }
 
@@ -520,10 +592,13 @@ function handleCalendar(command, args) {
 
 (() => {
   const outbox = createMockOutbox();
-  const files = [{ filename: 'doc.pdf', path: './.files/doc.pdf' }];
-  const env = writeEnvelope(outbox, 'my-agent', 'with attachment', files);
+  const filesFolder = createMockFilesFolder();
+  filesFolder.createFile('doc.pdf', 'pdf bytes', 'application/pdf');
+  const env = writeEnvelope(outbox, 'my-agent', 'with attachment', [{ filename: 'doc.pdf' }], filesFolder);
   assertEqual(env.files.length, 1, 'writeEnvelope: includes files');
   assertEqual(env.files[0].filename, 'doc.pdf', 'writeEnvelope: file reference correct');
+  assert(!('path' in env.files[0]), 'writeEnvelope: filename-only entries (no path field)');
+  assert(outbox._subfolders[env.id], 'writeEnvelope: stages bundle subfolder in outbox');
 })();
 
 (() => {

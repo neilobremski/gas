@@ -58,6 +58,12 @@ clasp push                 # push without testing
 | `MARKDOWN_AUTO` | on | Set `false` to disable auto Markdown detection |
 | `LOGGING_ENABLED` | off | Set by `enableLogging()` — shared with Bridge pattern |
 
+### A8S (`a8s/`)
+
+- Edit `a8s/Code.js`, bump `VERSION` constant and header comment (`A8S vX.Y`).
+- Deploy via `a8s/deploy.sh` (clasp push + Apps Script version).
+- Tests: `a8s/tests/run` (134 tests).
+
 ### GAS Bridge (`bridge/`)
 
 - Edit `bridge/Code.js`, bump `version` in `_info()` and the header comment.
@@ -115,10 +121,45 @@ Mirrors GAS Bridge `_logRequest` pattern:
 
 | Component | How to test |
 |-----------|-------------|
-| A8S | `a8s/tests/run` — 132 tests, mocked Gmail/Drive/Calendar + `marked` from npm |
+| A8S | `a8s/tests/run` — 134 tests, mocked Gmail/Drive/Calendar + `marked` from npm |
 | Bridge | Manual curl / `gas` CLI against deployed instance |
 
 Add tests in `a8s/tests/test.js` using `assert` / `assertEqual`. Run before every push.
+
+## PII check
+
+Same approach as `~/bin`: `.github/pii_check.py` scans **added lines** in git diffs against regex patterns.
+
+| Context | Patterns source |
+|---------|-----------------|
+| Local pre-push | `.github/pii-patterns.local.txt` (gitignored) |
+| GitHub Actions | `PII_PATTERNS` repository secret |
+
+Setup:
+
+```bash
+cp .github/pii-patterns.example.txt .github/pii-patterns.local.txt
+./install-hooks.sh
+.github/sync-pii-patterns.sh   # after editing local patterns
+python3 tests/test_pii.py
+python3 .github/pii_check.py   # scan branch vs main
+```
+
+Use `example.com` and placeholder names in committed code — never real emails, agent names, or infrastructure hosts.
+
+## Version bumps
+
+CI requires a version bump when deployable files change under `bridge/` or `a8s/` (excludes README, tests, vendor, lockfiles).
+
+| Component | Locations |
+|-----------|-----------|
+| Bridge | Header `GAS Bridge vX.Y` and `_info()` `version: 'X.Y'` in `bridge/Code.js` |
+| A8S | Header `A8S vX.Y` and `const VERSION = 'X.Y'` in `a8s/Code.js` |
+
+```bash
+python3 tests/test_version.py
+python3 .github/version_check.py   # scan branch vs main
+```
 
 ## Key APIs
 

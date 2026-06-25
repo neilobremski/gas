@@ -74,3 +74,20 @@ Bridge logs HTTP actions (`gmail.send`, etc.). A8S logs commands (`a8s.send`, `a
 | Standalone modules | — | Copy-paste |
 
 Agent-oriented conventions and workflows: [AGENTS.md](AGENTS.md).
+
+## CI
+
+GitHub Actions runs on pull requests:
+
+- **pii-check** — scans the PR diff for patterns in the `PII_PATTERNS` secret
+- **version-check** — requires version bumps in `bridge/Code.js` / `a8s/Code.js` when deployable files change
+- **a8s** — `npm ci`, vendor marked, 134 Node tests, PII and version unit tests
+
+Local setup:
+
+```bash
+cp .github/pii-patterns.example.txt .github/pii-patterns.local.txt
+# edit patterns, then:
+./install-hooks.sh              # pre-push hook
+.github/sync-pii-patterns.sh    # sync secret for CI
+```
