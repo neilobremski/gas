@@ -58,6 +58,12 @@ clasp push                 # push without testing
 | `MARKDOWN_AUTO` | on | Set `false` to disable auto Markdown detection |
 | `LOGGING_ENABLED` | off | Set by `enableLogging()` — shared with Bridge pattern |
 
+### A8S (`a8s/`)
+
+- Edit `a8s/Code.js`, bump `VERSION` constant and header comment (`A8S vX.Y`).
+- Deploy via `a8s/deploy.sh` (clasp push + Apps Script version).
+- Tests: `a8s/tests/run` (134 tests).
+
 ### GAS Bridge (`bridge/`)
 
 - Edit `bridge/Code.js`, bump `version` in `_info()` and the header comment.
@@ -140,6 +146,20 @@ python3 .github/pii_check.py   # scan branch vs main
 ```
 
 Use `example.com` and placeholder names in committed code — never real emails, agent names, or infrastructure hosts.
+
+## Version bumps
+
+CI requires a version bump when deployable files change under `bridge/` or `a8s/` (excludes README, tests, vendor, lockfiles).
+
+| Component | Locations |
+|-----------|-----------|
+| Bridge | Header `GAS Bridge vX.Y` and `_info()` `version: 'X.Y'` in `bridge/Code.js` |
+| A8S | Header `A8S vX.Y` and `const VERSION = 'X.Y'` in `a8s/Code.js` |
+
+```bash
+python3 tests/test_version.py
+python3 .github/version_check.py   # scan branch vs main
+```
 
 ## Key APIs
 

@@ -18,6 +18,18 @@ jobs:
           PII_PATTERNS: ${{ secrets.PII_PATTERNS }}
         run: python3 .github/pii_check.py
 
+  version-check:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Require version bumps for bridge/ and a8s/ changes
+        run: >
+          python3 .github/version_check.py
+          --range "${{ github.event.pull_request.base.sha }}...${{ github.event.pull_request.head.sha }}"
+
   a8s:
     runs-on: ubuntu-latest
     steps:
@@ -33,3 +45,5 @@ jobs:
           tests/run
       - name: PII check unit tests
         run: python3 tests/test_pii.py
+      - name: Version bump unit tests
+        run: python3 tests/test_version.py

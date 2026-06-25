@@ -1,4 +1,11 @@
+/*
+ * A8S v1.0 — Agent-to-agent messaging via Google Drive
+ *
+ * Polls .inbox/ for commands, executes Gmail/Calendar ops, writes .outbox/ envelopes.
+ */
 const A8S = (() => {
+
+  const VERSION = '1.0';
 
   const CROCKFORD = '0123456789ABCDEFGHJKMNPQRSTVWXYZ';
 
@@ -906,6 +913,7 @@ const A8S = (() => {
     if (!config.rootFolderId) { Logger.log('ERROR: A8S_ROOT_FOLDER_ID not set'); return; }
     try {
       const root = DriveApp.getFolderById(config.rootFolderId);
+      Logger.log(`Version: ${VERSION}`);
       Logger.log(`Root: ${root.getName()} (${root.getId()})`);
       Logger.log(`.inbox: ${getOrCreateSubfolder(root, '.inbox').getId()}`);
       Logger.log(`.outbox: ${getOrCreateSubfolder(root, '.outbox').getId()}`);

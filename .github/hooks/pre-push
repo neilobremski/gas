@@ -12,4 +12,5 @@ while read -r local_ref local_sha remote_ref remote_sha; do
     range="${remote_sha}..${local_sha}"
   fi
   python3 "${ROOT}/.github/pii_check.py" --range "$range"
+  python3 "${ROOT}/.github/version_check.py" --range "$range"
 done

@@ -80,7 +80,8 @@ Agent-oriented conventions and workflows: [AGENTS.md](AGENTS.md).
 GitHub Actions runs on pull requests:
 
 - **pii-check** — scans the PR diff for patterns in the `PII_PATTERNS` secret
-- **a8s** — `npm ci`, vendor marked, 134 Node tests, PII unit tests
+- **version-check** — requires version bumps in `bridge/Code.js` / `a8s/Code.js` when deployable files change
+- **a8s** — `npm ci`, vendor marked, 134 Node tests, PII and version unit tests
 
 Local setup:
 
