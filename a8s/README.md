@@ -24,13 +24,13 @@ Drive folder layout:
 Register the **same** Drive mount under multiple filedrop names — a command node plus each email principal. Mail to either name lands in the shared `.inbox/`; GAS routes on `envelope.to`:
 
 ```bash
-a8s add knobert-google /mnt/gdrive/a8s filedrop
+a8s add my-google /mnt/gdrive/a8s filedrop
 a8s add neil-email /mnt/gdrive/a8s filedrop
 ```
 
 | `to` | GAS behavior |
 |------|----------------|
-| `knobert-google` (`A8S_DEVICE`) | Slash commands (if `from` is in `A8S_COMMAND_AGENTS`) |
+| `my-google` (`A8S_DEVICE`) | Slash commands (if `from` is in `A8S_COMMAND_AGENTS`) |
 | `neil-email` (value in `A8S_EMAIL_MAP`) | Opaque outbound email to the mapped address |
 
 Email-ingress outbox envelopes set `"from": "neil-email"` so replies can target the email principal.
@@ -88,10 +88,10 @@ clasp open                 # open in browser
 | Property | Value |
 |----------|-------|
 | `A8S_ROOT_FOLDER_ID` | Drive folder ID (from the URL) |
-| `A8S_DEVICE` | Filedrop command-node name (e.g. `knobert-google`) |
+| `A8S_DEVICE` | Filedrop command-node name (e.g. `my-google`) |
 | `A8S_DEFAULT_AGENT` | Sticky push destination when subject has no `@agent` |
 | `A8S_EMAIL_MAP` | JSON map `{"human@example.com":"neil-email"}` (address → email principal) |
-| `A8S_COMMAND_AGENTS` | Comma list allowed to run `/commands` on the device (e.g. `neil-phone,knobert-google`) |
+| `A8S_COMMAND_AGENTS` | Comma list allowed to run `/commands` on the device (e.g. `neil-phone,my-google`) |
 | `CAPABILITIES` | Comma-delimited: `gmail,calendar` |
 | `TRIGGER_MINUTES` | Polling interval: 1, 5, 10, 15, or 30 (default: 5) |
 | `MARKDOWN_AUTO` | Set to `false` to disable auto Markdown detection (default: **on**) |
@@ -106,18 +106,18 @@ Legacy: if `A8S_DEVICE` / `A8S_DEFAULT_AGENT` are unset, `A8S_PARTICIPANT` fills
 On the server side, register the shared Drive mount once per name (command node + email principals):
 
 ```bash
-a8s add knobert-google /mnt/gdrive/a8s filedrop
+a8s add my-google /mnt/gdrive/a8s filedrop
 a8s add neil-email /mnt/gdrive/a8s filedrop
-a8s start knobert-google   # or start an alias that covers both
+a8s start my-google   # or start an alias that covers both
 ```
 
 Example properties:
 
 ```
-A8S_DEVICE=knobert-google
+A8S_DEVICE=my-google
 A8S_DEFAULT_AGENT=bob
 A8S_EMAIL_MAP={"human@example.com":"neil-email"}
-A8S_COMMAND_AGENTS=neil-phone,knobert-google
+A8S_COMMAND_AGENTS=neil-phone,my-google
 ```
 
 ## Routing
@@ -150,7 +150,7 @@ Every trigger cycle, checks **unread** emails:
 
 When an agent `tell`s an **email principal** (e.g. `tell neil-email "status?"`), GAS sends a **new** email (no thread reply in v1) to that principal’s mapped address. Subject is `@<sender>` so a human reply `Re: @bob …` routes back to that agent. Slash text on this path is not executed — it is mailed as the body.
 
-Device commands use the command node: `tell knobert-google "/check"`.
+Device commands use the command node: `tell my-google "/check"`.
 
 ### Calendar push
 
@@ -237,7 +237,7 @@ Please review the **API changes** below:
 ```
 
 ```
-tell knobert-google "/reply <thread_id>"
+tell my-google "/reply <thread_id>"
 Your reply with **markdown** here.
 ```
 

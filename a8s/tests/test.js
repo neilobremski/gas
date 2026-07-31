@@ -717,7 +717,7 @@ function handleCalendar(command, args) {
 
 (() => {
   const config = {
-    device: 'knobert-google',
+    device: 'my-google',
     defaultAgent: 'bob',
     emailMap: { 'human@example.com': 'neil-email' }
   };
@@ -738,13 +738,13 @@ function handleCalendar(command, args) {
 
 (() => {
   const config = {
-    device: 'knobert-google',
+    device: 'my-google',
     emailMap: { 'human@example.com': 'neil-email', 'alt@example.com': 'other-email' }
   };
   assertEqual(addressForEmailAgent('neil-email', config), 'human@example.com', 'addressForEmailAgent: match');
   assertEqual(addressForEmailAgent('missing', config), '', 'addressForEmailAgent: miss');
   assert(isEmailPrincipal('neil-email', config), 'isEmailPrincipal: yes');
-  assert(!isEmailPrincipal('knobert-google', config), 'isEmailPrincipal: device is not email principal');
+  assert(!isEmailPrincipal('my-google', config), 'isEmailPrincipal: device is not email principal');
   assertEqual(outboundEmailSubject('bob'), '@bob', 'outboundEmailSubject: @from');
   assertEqual(resolveCalendarDestination('@alice standup', { defaultAgent: 'bob' }), 'alice', 'calendar dest: @');
   assertEqual(resolveCalendarDestination('standup', { defaultAgent: 'bob' }), 'bob', 'calendar dest: sticky');
@@ -752,17 +752,17 @@ function handleCalendar(command, args) {
 
 (() => {
   const config = {
-    device: 'knobert-google',
+    device: 'my-google',
     emailMap: { 'human@example.com': 'neil-email' }
   };
   assertEqual(decideInboxRoute({ to: 'neil-email' }, config), 'email', 'decideInboxRoute: email principal');
-  assertEqual(decideInboxRoute({ to: 'knobert-google' }, config), 'device', 'decideInboxRoute: device');
+  assertEqual(decideInboxRoute({ to: 'my-google' }, config), 'device', 'decideInboxRoute: device');
   assertEqual(decideInboxRoute({ to: '' }, config), 'device', 'decideInboxRoute: empty to = device');
   assertEqual(decideInboxRoute({ to: 'unknown-agent' }, config), 'drop', 'decideInboxRoute: unknown');
 })();
 
 (() => {
-  assert(isCommandAgent('neil-phone', { commandAgents: ['neil-phone', 'knobert-google'] }), 'isCommandAgent: allowed');
+  assert(isCommandAgent('neil-phone', { commandAgents: ['neil-phone', 'my-google'] }), 'isCommandAgent: allowed');
   assert(!isCommandAgent('intruder', { commandAgents: ['neil-phone'] }), 'isCommandAgent: denied');
 })();
 

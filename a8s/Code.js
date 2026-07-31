@@ -1081,10 +1081,10 @@ const A8S = (() => {
     if (!props.getProperty('A8S_ROOT_FOLDER_ID')) {
       Logger.log('Set Script Properties:');
       Logger.log('  A8S_ROOT_FOLDER_ID — Drive folder ID');
-      Logger.log('  A8S_DEVICE — filedrop command node name (e.g. "knobert-google")');
+      Logger.log('  A8S_DEVICE — filedrop command node name (e.g. "my-google")');
       Logger.log('  A8S_DEFAULT_AGENT — sticky push destination (e.g. "bob")');
       Logger.log('  A8S_EMAIL_MAP — JSON {"human@example.com":"neil-email"}');
-      Logger.log('  A8S_COMMAND_AGENTS — comma list allowed to run /commands (e.g. "neil-phone,knobert-google")');
+      Logger.log('  A8S_COMMAND_AGENTS — comma list allowed to run /commands (e.g. "neil-phone,my-google")');
       Logger.log('  CAPABILITIES — comma-delimited list (e.g. "gmail,calendar")');
       Logger.log('  TRIGGER_MINUTES — trigger interval: 1, 5, 10, 15, or 30 (default: 5)');
       Logger.log('  MARKDOWN_AUTO — set to "false" to disable auto Markdown detection (default: on)');
