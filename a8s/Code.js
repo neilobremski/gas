@@ -1,12 +1,12 @@
 /*
- * A8S v1.2 — Agent-to-agent messaging via Google Drive
+ * A8S v1.1 — Agent-to-agent messaging via Google Drive
  *
  * Polls .inbox/ for commands, routes email/calendar like an SMS bridge,
  * writes .outbox/ envelopes.
  */
 const A8S = (() => {
 
-  const VERSION = '1.2';
+  const VERSION = '1.1';
 
   const CROCKFORD = '0123456789ABCDEFGHJKMNPQRSTVWXYZ';
 
