@@ -57,6 +57,130 @@ function parseCommand(content) {
   return { command: parts[0], args: parts.slice(1), body: lines.slice(1).join('\n').trim() };
 }
 
+function normalizeEmailAddress(fromHeader) {
+  if (!fromHeader) return '';
+  let s = String(fromHeader).trim();
+  const angle = s.match(/<([^>]+)>/);
+  if (angle) s = angle[1].trim();
+  if (s.toLowerCase().indexOf('mailto:') === 0) s = s.slice(7).trim();
+  return s.toLowerCase();
+}
+
+function parseEmailMap(raw) {
+  if (!raw || !String(raw).trim()) return {};
+  try {
+    const obj = JSON.parse(raw);
+    const out = {};
+    Object.keys(obj).forEach(k => {
+      const addr = normalizeEmailAddress(k);
+      const agent = String(obj[k] || '').trim();
+      if (addr && agent) out[addr] = agent;
+    });
+    return out;
+  } catch (e) {
+    return {};
+  }
+}
+
+function parseCommandAgents(raw, device) {
+  const list = (raw || '').split(',').map(s => s.trim()).filter(Boolean);
+  if (list.length) return list;
+  return device ? [device] : [];
+}
+
+function stripReplyPrefixes(subject) {
+  let s = (subject || '').trim();
+  const prefixes = ['re:', 'fwd:', 'fw:'];
+  while (true) {
+    const lower = s.toLowerCase();
+    let matched = false;
+    for (let i = 0; i < prefixes.length; i++) {
+      const pref = prefixes[i];
+      if (lower.indexOf(pref) === 0) {
+        s = s.slice(pref.length).replace(/^\s+/, '');
+        matched = true;
+        break;
+      }
+    }
+    if (!matched) break;
+  }
+  return s;
+}
+
+function parseSubjectRoute(subject) {
+  const stripped = stripReplyPrefixes(subject);
+  const m = stripped.match(/@([A-Za-z0-9_.:-]+)/);
+  if (!m) return { agent: null, subjectRest: stripped };
+  const agent = m[1];
+  const subjectRest = (stripped.slice(0, m.index) + stripped.slice(m.index + m[0].length))
+    .replace(/\s+/g, ' ')
+    .trim();
+  return { agent, subjectRest };
+}
+
+function resolveEmailPush(fromHeader, subject, config) {
+  const addr = normalizeEmailAddress(fromHeader);
+  if (!addr || !config.emailMap[addr]) {
+    return { ok: false, reason: 'unmapped' };
+  }
+  const fromAgent = config.emailMap[addr];
+  if (!config.defaultAgent) {
+    return { ok: false, reason: 'no-default' };
+  }
+  const route = parseSubjectRoute(subject);
+  return {
+    ok: true,
+    to: route.agent || config.defaultAgent,
+    fromAgent,
+    subjectRest: route.subjectRest,
+    fromAddress: addr
+  };
+}
+
+function addressForEmailAgent(agent, config) {
+  if (!agent) return '';
+  const keys = Object.keys(config.emailMap || {});
+  for (let i = 0; i < keys.length; i++) {
+    if (config.emailMap[keys[i]] === agent) return keys[i];
+  }
+  return '';
+}
+
+function isEmailPrincipal(name, config) {
+  return !!addressForEmailAgent(name, config);
+}
+
+function isDeviceTarget(to, config) {
+  const t = (to || '').trim();
+  if (!t) return true;
+  return t === (config.device || '');
+}
+
+function decideInboxRoute(envelope, config) {
+  const to = (envelope && envelope.to) || '';
+  if (isEmailPrincipal(to, config)) return 'email';
+  if (isDeviceTarget(to, config)) return 'device';
+  return 'drop';
+}
+
+function isCommandAgent(from, config) {
+  const agents = config.commandAgents || [];
+  if (!from) return false;
+  for (let i = 0; i < agents.length; i++) {
+    if (agents[i] === from) return true;
+  }
+  return false;
+}
+
+function resolveCalendarDestination(title, config) {
+  const route = parseSubjectRoute(title || '');
+  return route.agent || config.defaultAgent;
+}
+
+function outboundEmailSubject(fromAgent) {
+  return '@' + (fromAgent || 'unknown');
+}
+
 // --- Markdown email helpers (mirrored from Code.js) ---
 
 const MAX_HTML_BODY_BYTES = 200 * 1024;
@@ -197,13 +321,12 @@ function formatLogStatus(response) {
   return 'ok';
 }
 
-function formatEmailForAgent(msg, threadId) {
-  const from = msg.getFrom();
-  const subject = msg.getSubject();
-  const date = msg.getDate().toISOString();
-  let body = msg.getPlainBody();
+function formatEmailForAgent(msg, subjectRest) {
+  let body = msg.getPlainBody() || '';
   if (body.length > 4000) body = body.substring(0, 4000) + '\n[truncated]';
-  return `New email\nthread_id: ${threadId}\nfrom: ${from}\nsubject: ${subject}\ndate: ${date}\n---\n${body}`;
+  const rest = (subjectRest || '').trim();
+  if (rest && body) return rest + '\n\n' + body;
+  return rest || body;
 }
 
 const pad = n => (n < 10 ? '0' : '') + n;
@@ -297,13 +420,14 @@ function copyFileToBundle(filesFolder, bundle, filename) {
   bundle.createFile(filename, src.content, src.mimeType);
 }
 
-function writeEnvelope(outbox, to, content, files, filesFolder) {
+function writeEnvelope(outbox, to, content, files, filesFolder, fromAgent) {
   const envelope = {
     id: ulid(),
     date: new Date().toISOString(),
     to,
     content
   };
+  if (fromAgent) envelope.from = fromAgent;
   if (files && files.length) {
     const bundle = getOrCreateSubfolder(outbox, envelope.id);
     const normalized = [];
@@ -369,14 +493,18 @@ function createMockThread(id, messages) {
   };
 }
 
-function createMockMessage({ from, subject, date, body, unread = false, attachments = [], onReply } = {}) {
+function createMockMessage({ from, subject, date, body, unread = false, attachments = [], onReply, onMarkRead } = {}) {
+  let isUnread = unread;
   return {
     getFrom: () => from,
     getSubject: () => subject,
     getDate: () => new Date(date),
     getPlainBody: () => body,
-    isUnread: () => unread,
-    markRead: () => {},
+    isUnread: () => isUnread,
+    markRead: () => {
+      isUnread = false;
+      if (onMarkRead) onMarkRead();
+    },
     getAttachments: () => attachments,
     reply: (body, opts) => {
       if (onReply) onReply({ body, opts });
@@ -546,6 +674,98 @@ function handleCalendar(command, args) {
   assertEqual(result.command, '/check', 'parseCommand: trims whitespace');
 })();
 
+// --- normalizeEmailAddress / parseSubjectRoute / resolveEmailPush ---
+
+(() => {
+  assertEqual(normalizeEmailAddress('human@example.com'), 'human@example.com', 'normalizeEmail: bare');
+  assertEqual(normalizeEmailAddress('Alice <Human@Example.com>'), 'human@example.com', 'normalizeEmail: angle + case');
+  assertEqual(normalizeEmailAddress('mailto:bob@example.com'), 'bob@example.com', 'normalizeEmail: mailto');
+  assertEqual(normalizeEmailAddress(''), '', 'normalizeEmail: empty');
+})();
+
+(() => {
+  const r = parseSubjectRoute('RE: @bob the thing');
+  assertEqual(r.agent, 'bob', 'parseSubjectRoute: Re: @bob');
+  assertEqual(r.subjectRest, 'the thing', 'parseSubjectRoute: rest after @bob');
+})();
+
+(() => {
+  const r = parseSubjectRoute('Re: Fwd: @alice-laptop hello');
+  assertEqual(r.agent, 'alice-laptop', 'parseSubjectRoute: strips Re/Fwd');
+  assertEqual(r.subjectRest, 'hello', 'parseSubjectRoute: multiword rest');
+})();
+
+(() => {
+  const r = parseSubjectRoute('plain subject');
+  assertEqual(r.agent, null, 'parseSubjectRoute: no @');
+  assertEqual(r.subjectRest, 'plain subject', 'parseSubjectRoute: keeps subject');
+})();
+
+(() => {
+  const r = parseSubjectRoute('@bob');
+  assertEqual(r.agent, 'bob', 'parseSubjectRoute: bare @agent');
+  assertEqual(r.subjectRest, '', 'parseSubjectRoute: empty rest');
+})();
+
+(() => {
+  const map = parseEmailMap('{"Human@Example.com":"neil-email"}');
+  assertEqual(map['human@example.com'], 'neil-email', 'parseEmailMap: normalizes keys');
+  assertDeepEqual(parseEmailMap('not-json'), {}, 'parseEmailMap: invalid JSON');
+  assertDeepEqual(parseCommandAgents('neil-phone, neil-email', 'neil-email'), ['neil-phone', 'neil-email'], 'parseCommandAgents: list');
+  assertDeepEqual(parseCommandAgents('', 'neil-email'), ['neil-email'], 'parseCommandAgents: fallback device');
+})();
+
+(() => {
+  const config = {
+    device: 'knobert-google',
+    defaultAgent: 'bob',
+    emailMap: { 'human@example.com': 'neil-email' }
+  };
+  const hit = resolveEmailPush('Alice <human@example.com>', 'RE: @carol hi', config);
+  assert(hit.ok, 'resolveEmailPush: mapped ok');
+  assertEqual(hit.to, 'carol', 'resolveEmailPush: @ override');
+  assertEqual(hit.fromAgent, 'neil-email', 'resolveEmailPush: fromAgent from map');
+  assertEqual(hit.subjectRest, 'hi', 'resolveEmailPush: subject rest');
+
+  const sticky = resolveEmailPush('human@example.com', 'hello', config);
+  assertEqual(sticky.to, 'bob', 'resolveEmailPush: sticky default');
+  assertEqual(sticky.fromAgent, 'neil-email', 'resolveEmailPush: sticky fromAgent');
+
+  const miss = resolveEmailPush('other@example.com', '@bob x', config);
+  assert(!miss.ok, 'resolveEmailPush: unmapped');
+  assertEqual(miss.reason, 'unmapped', 'resolveEmailPush: unmapped reason');
+})();
+
+(() => {
+  const config = {
+    device: 'knobert-google',
+    emailMap: { 'human@example.com': 'neil-email', 'alt@example.com': 'other-email' }
+  };
+  assertEqual(addressForEmailAgent('neil-email', config), 'human@example.com', 'addressForEmailAgent: match');
+  assertEqual(addressForEmailAgent('missing', config), '', 'addressForEmailAgent: miss');
+  assert(isEmailPrincipal('neil-email', config), 'isEmailPrincipal: yes');
+  assert(!isEmailPrincipal('knobert-google', config), 'isEmailPrincipal: device is not email principal');
+  assertEqual(outboundEmailSubject('bob'), '@bob', 'outboundEmailSubject: @from');
+  assertEqual(resolveCalendarDestination('@alice standup', { defaultAgent: 'bob' }), 'alice', 'calendar dest: @');
+  assertEqual(resolveCalendarDestination('standup', { defaultAgent: 'bob' }), 'bob', 'calendar dest: sticky');
+})();
+
+(() => {
+  const config = {
+    device: 'knobert-google',
+    emailMap: { 'human@example.com': 'neil-email' }
+  };
+  assertEqual(decideInboxRoute({ to: 'neil-email' }, config), 'email', 'decideInboxRoute: email principal');
+  assertEqual(decideInboxRoute({ to: 'knobert-google' }, config), 'device', 'decideInboxRoute: device');
+  assertEqual(decideInboxRoute({ to: '' }, config), 'device', 'decideInboxRoute: empty to = device');
+  assertEqual(decideInboxRoute({ to: 'unknown-agent' }, config), 'drop', 'decideInboxRoute: unknown');
+})();
+
+(() => {
+  assert(isCommandAgent('neil-phone', { commandAgents: ['neil-phone', 'knobert-google'] }), 'isCommandAgent: allowed');
+  assert(!isCommandAgent('intruder', { commandAgents: ['neil-phone'] }), 'isCommandAgent: denied');
+})();
+
 // --- formatEmailForAgent() ---
 
 (() => {
@@ -555,13 +775,18 @@ function handleCalendar(command, args) {
     date: '2026-01-15T10:30:00Z',
     body: 'Hello there'
   });
-  const result = formatEmailForAgent(msg, 'thread_abc');
-  assert(result.includes('New email'), 'formatEmail: starts with New email');
-  assert(result.includes('thread_id: thread_abc'), 'formatEmail: includes thread_id');
-  assert(result.includes('from: alice@example.com'), 'formatEmail: includes from');
-  assert(result.includes('subject: Test Subject'), 'formatEmail: includes subject');
-  assert(result.includes('date: 2026-01-15T10:30:00.000Z'), 'formatEmail: includes date');
-  assert(result.includes('---\nHello there'), 'formatEmail: includes body after separator');
+  const result = formatEmailForAgent(msg, 'the thing');
+  assertEqual(result, 'the thing\n\nHello there', 'formatEmail: subject rest + body');
+})();
+
+(() => {
+  const msg = createMockMessage({
+    from: 'alice@example.com',
+    subject: 'Test',
+    date: '2026-01-15T10:30:00Z',
+    body: 'Hello there'
+  });
+  assertEqual(formatEmailForAgent(msg, ''), 'Hello there', 'formatEmail: body only when no rest');
 })();
 
 (() => {
@@ -572,7 +797,7 @@ function handleCalendar(command, args) {
     date: '2026-01-15T10:30:00Z',
     body: longBody
   });
-  const result = formatEmailForAgent(msg, 'thread_long');
+  const result = formatEmailForAgent(msg, '');
   assert(result.includes('[truncated]'), 'formatEmail: truncates body over 4000 chars');
   assert(!result.includes('x'.repeat(5000)), 'formatEmail: body is actually shorter');
 })();
@@ -587,7 +812,14 @@ function handleCalendar(command, args) {
   assertEqual(env.id.length, 26, 'writeEnvelope: id is ulid');
   assert(env.date.includes('T'), 'writeEnvelope: date is ISO');
   assert(!env.files, 'writeEnvelope: no files when null');
+  assert(!env.from, 'writeEnvelope: omits from when unset');
   assertEqual(outbox.getFiles().length, 1, 'writeEnvelope: creates file in outbox');
+})();
+
+(() => {
+  const outbox = createMockOutbox();
+  const env = writeEnvelope(outbox, 'bob', 'hi', null, null, 'neil-email');
+  assertEqual(env.from, 'neil-email', 'writeEnvelope: sets from for email principal');
 })();
 
 (() => {
