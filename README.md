@@ -7,7 +7,7 @@ Google Apps Script modules and deployable scripts for Google Workspace automatio
 | Path | What it is | Deploy |
 |------|------------|--------|
 | [`bridge/`](bridge/) | **GAS Bridge** — key-authenticated JSON API for Gmail, Drive, Sheets, Calendar, Docs, Contacts, Tasks, Translate, Gemini | Apps Script Web App |
-| [`a8s/`](a8s/) | **A8S participant** — Drive file-proxy agent; polls commands, pushes email/calendar notifications | clasp (`./deploy.sh`) |
+| [`a8s/`](a8s/) | **A8S participant** — Drive filedrop agent; polls commands, pushes email/calendar notifications | clasp (`./deploy.sh`) |
 | [`GasAWS.js`](GasAWS.js), [`GasBQ.js`](GasBQ.js) | Standalone library snippets to copy into your own GAS projects | Manual copy |
 | [`vidsite/`](vidsite/) | Static site | — |
 
@@ -17,6 +17,7 @@ The [`gas`](https://github.com/neilobremski/gas) Python CLI (separate install) t
 
 - [GAS Bridge README](bridge/README.md) — actions, quotas, security, logging
 - [A8S README](a8s/README.md) — setup, commands, Markdown email, transaction logging
+- [A8S upstream (ar3)](https://github.com/witw-llc/ar3/blob/main/docs/a8s.md) — Agent Infinity System docs
 - [AGENTS.md](AGENTS.md) — guidance for AI agents working in this repo
 
 ## GAS Bridge
@@ -27,7 +28,7 @@ See [bridge/README.md](bridge/README.md) for the full action list, setup, and de
 
 ## A8S participant
 
-A time-triggered GAS script that bridges an [A8S](https://github.com/neilobremski/a8s) file-proxy agent to Gmail and Calendar via a Google Drive folder (`.inbox`, `.outbox`, `.files`).
+A time-triggered GAS script that bridges an [A8S](https://github.com/witw-llc/ar3) [filedrop](https://github.com/witw-llc/ar3/blob/main/docs/a8s-filedrop.md) agent to Gmail and Calendar via a Google Drive folder (`.inbox`, `.outbox`, `.files`). Upstream docs: [a8s.md](https://github.com/witw-llc/ar3/blob/main/docs/a8s.md).
 
 Features:
 
@@ -69,7 +70,7 @@ Bridge logs HTTP actions (`gmail.send`, etc.). A8S logs commands (`a8s.send`, `a
 
 | Component | Tests | Deploy |
 |-----------|-------|--------|
-| A8S | `a8s/tests/run` (132 tests) | `a8s/deploy.sh` |
+| A8S | `a8s/tests/run` (169 tests) | `a8s/deploy.sh` |
 | Bridge | Manual / `gas` CLI | Apps Script editor |
 | Standalone modules | — | Copy-paste |
 
@@ -81,7 +82,7 @@ GitHub Actions runs on pull requests:
 
 - **pii-check** — scans the PR diff for patterns in the `PII_PATTERNS` secret
 - **version-check** — requires version bumps in `bridge/Code.js` / `a8s/Code.js` when deployable files change
-- **a8s** — `npm ci`, vendor marked, 134 Node tests, PII and version unit tests
+- **a8s** — `npm ci`, vendor marked, 169 Node tests, PII and version unit tests
 
 Local setup:
 

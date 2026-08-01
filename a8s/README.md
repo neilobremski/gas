@@ -1,6 +1,8 @@
 # A8S-GAS — Google Apps Script participant for A8S
 
-A GAS script that acts as an A8S participant via Google Drive (file-proxy transport). Polls for commands, pushes email notifications and calendar events, downloads Drive file attachments including Google Docs as markdown.
+A GAS script that acts as an [A8S](https://github.com/witw-llc/ar3) participant via Google Drive ([filedrop](https://github.com/witw-llc/ar3/blob/main/docs/a8s-filedrop.md) transport). Polls for commands, routes inbound email/calendar like an SMS bridge, and can send new outbound email when agents message an email principal.
+
+Upstream A8S docs: [docs/a8s.md](https://github.com/witw-llc/ar3/blob/main/docs/a8s.md) · [filedrop](https://github.com/witw-llc/ar3/blob/main/docs/a8s-filedrop.md)
 
 ## Architecture
 
@@ -19,15 +21,29 @@ Drive folder layout:
     <msg_id>/          ← inbound attachments (A8S → GAS, e.g. tell --attach)
 ```
 
+Register the **same** Drive mount under multiple filedrop names — a command node plus each email principal. Mail to either name lands in the shared `.inbox/`; GAS routes on `envelope.to`:
+
+```bash
+a8s add my-google /mnt/gdrive/a8s filedrop
+a8s add neil-email /mnt/gdrive/a8s filedrop
+```
+
+| `to` | GAS behavior |
+|------|----------------|
+| `my-google` (`A8S_DEVICE`) | Slash commands (if `from` is in `A8S_COMMAND_AGENTS`) |
+| `neil-email` (value in `A8S_EMAIL_MAP`) | Opaque outbound email to the mapped address |
+
+Email-ingress outbox envelopes set `"from": "neil-email"` so replies can target the email principal.
+
 ## Project files
 
 | File | Role |
 |------|------|
-| `Code.js` | Main script — commands, push, markdown, logging |
+| `Code.js` | Main script — commands, push routing, markdown, logging |
 | `vendor/marked.js` | Transpiled [marked](https://github.com/markedjs/marked) (ES2017 for GAS) |
 | `appsscript.json` | Manifest (V8, Calendar advanced service) |
 | `package.json` | npm deps; `npm run vendor` rebuilds `vendor/marked.js` |
-| `tests/test.js` | 132 unit tests (`tests/run`) |
+| `tests/test.js` | Unit tests (`tests/run`) |
 | `.claspignore` | Excludes `node_modules/`, tests, scripts from clasp push |
 
 **Do not** push `node_modules/` — clasp will fail on ES module syntax. The vendor script transpiles marked for GAS.
@@ -50,13 +66,13 @@ clasp create --type standalone --title "A8S GAS"   # or set scriptId in .clasp.j
 ./deploy.sh
 ```
 
-This runs `npm ci`, transpiles marked to `vendor/marked.js`, runs 132 tests, then `clasp push`.
+This runs `npm ci`, transpiles marked to `vendor/marked.js`, runs tests, then `clasp push`.
 
 ### Manual commands
 
 ```bash
 npm ci && npm run vendor   # transpile marked → vendor/marked.js
-tests/run                  # 132 tests (Node.js + marked from npm)
+tests/run                  # unit tests (Node.js + marked from npm)
 clasp push                 # push without testing
 clasp pull                 # pull remote changes
 clasp open                 # open in browser
@@ -72,35 +88,71 @@ clasp open                 # open in browser
 | Property | Value |
 |----------|-------|
 | `A8S_ROOT_FOLDER_ID` | Drive folder ID (from the URL) |
-| `A8S_PARTICIPANT` | Who this script pushes to and accepts commands from |
+| `A8S_DEVICE` | Filedrop command-node name (e.g. `my-google`) |
+| `A8S_DEFAULT_AGENT` | Sticky push destination when subject has no `@agent` |
+| `A8S_EMAIL_MAP` | JSON map `{"human@example.com":"neil-email"}` (address → email principal) |
+| `A8S_COMMAND_AGENTS` | Comma list allowed to run `/commands` on the device (e.g. `neil-phone,my-google`) |
 | `CAPABILITIES` | Comma-delimited: `gmail,calendar` |
 | `TRIGGER_MINUTES` | Polling interval: 1, 5, 10, 15, or 30 (default: 5) |
 | `MARKDOWN_AUTO` | Set to `false` to disable auto Markdown detection (default: **on**) |
+
+Legacy: if `A8S_DEVICE` / `A8S_DEFAULT_AGENT` are unset, `A8S_PARTICIPANT` fills both. If `A8S_COMMAND_AGENTS` is unset, only `A8S_DEVICE` may run commands.
 
 5. Run `setup()` from the editor to verify config
 6. Run `testConnection()` to confirm Drive access (will prompt for permissions)
 7. Run `enableLogging()` to enable transaction logging (optional; same sheets as GAS Bridge)
 8. Run `installTrigger()` to start polling
 
-On the server side, register the file-proxy agent:
+On the server side, register the shared Drive mount once per name (command node + email principals):
+
 ```bash
-a8s add my-google /mnt/gdrive/my-google/ file-proxy.json
+a8s add my-google /mnt/gdrive/a8s filedrop
+a8s add neil-email /mnt/gdrive/a8s filedrop
+a8s start my-google   # or start an alias that covers both
 ```
 
-## Email push
+Example properties:
 
-Every trigger cycle, checks for **unread** emails:
-1. Marks each as READ
-2. Stages attachments under `.outbox/<msg_id>/` (a8s bundle layout)
-3. Pushes an envelope per message to `A8S_PARTICIPANT` with:
-   - `thread_id` (for replying in the same thread)
-   - `from`, `subject`, `date`
-   - Email body (truncated at 4KB)
-   - `files: [{filename}]` (filename only — no `path` field)
+```
+A8S_DEVICE=my-google
+A8S_DEFAULT_AGENT=bob
+A8S_EMAIL_MAP={"human@example.com":"neil-email"}
+A8S_COMMAND_AGENTS=neil-phone,my-google
+```
 
-**Re-push:** Mark an email as UNREAD in Gmail → next trigger picks it up again.
+## Routing
 
-## Calendar push
+| Path | Behavior |
+|------|----------|
+| Unread email from mapped address, subject has `@agent` | Outbox `to: agent`, `from: <email-principal>` |
+| Unread email from mapped address, no `@` | Outbox `to: A8S_DEFAULT_AGENT`, `from: <email-principal>` |
+| Unread email from unmapped address | Left unread (not pushed) |
+| Calendar event (optional `@agent` in title) | Outbox to `@agent` or sticky default |
+| Inbox `to: A8S_DEVICE` + `/command` from `A8S_COMMAND_AGENTS` | Execute; reply to `envelope.from` |
+| Inbox `to: A8S_DEVICE` + `/command` from others | Rejected (unauthorized) |
+| Inbox `to: <email-principal>` | Opaque new email to mapped address; subject `@<sender>` |
+| Inbox `to:` unknown | Dropped |
+
+Subject parse strips leading `Re:` / `Fwd:` / `Fw:` (repeated), then takes the first `@agent` token. Example: `RE: @bob the thing` → `to: bob`, content subject rest + body.
+
+### Email push (mapped senders)
+
+Every trigger cycle, checks **unread** emails:
+1. Normalize `From:` and require an `A8S_EMAIL_MAP` hit (value = email principal name, e.g. `neil-email`)
+2. Resolve destination via `@agent` or sticky default
+3. Stage attachments under `.outbox/<msg_id>/`
+4. Write SMS-like content (optional subject remainder + body, body truncated at 4KB) with `from` = email principal
+5. Mark read **only after** a successful route
+
+**Re-push:** Mark an email as UNREAD in Gmail → next trigger picks it up again (still must be mapped).
+
+### Outbound email (agent → human)
+
+When an agent `tell`s an **email principal** (e.g. `tell neil-email "status?"`), GAS sends a **new** email (no thread reply in v1) to that principal’s mapped address. Subject is `@<sender>` so a human reply `Re: @bob …` routes back to that agent. Slash text on this path is not executed — it is mailed as the body.
+
+Device commands use the command node: `tell my-google "/check"`.
+
+### Calendar push
 
 Every trigger cycle, checks for events starting within 15 minutes. Each event is pushed as its own envelope with full details:
 
@@ -116,6 +168,8 @@ attendees: alice@example.com
 ---
 Check email, review messages, plan today's priorities
 ```
+
+Destination: `@agent` in the title if present, else `A8S_DEFAULT_AGENT`.
 
 ### Calendar as a scheduling mechanism
 
@@ -138,6 +192,8 @@ Files attached to calendar events (via Calendar Advanced Service) or linked in t
 Events are deduped by `eventId@startTime`. Rescheduling an event re-triggers the notification. Dedup entries expire after 1 hour.
 
 ## Commands
+
+Authorized senders are listed in `A8S_COMMAND_AGENTS` (e.g. `neil-phone` for diagnostics).
 
 ### Gmail (requires `gmail` in CAPABILITIES)
 
@@ -252,3 +308,5 @@ Run from the Apps Script editor:
 - Calendar Advanced Service required for event attachments
 - File transfer: outbound bundles under `.outbox/<msg_id>/`; inbound from A8S under `.files/<msg_id>/`
 - `ScriptApp.getOAuthToken()` used for Drive API export (Google Docs → markdown)
+- Register each email principal as a separate filedrop name on the same Drive mount as `A8S_DEVICE`
+- v1: outbound human mail is always a new message (no Gmail thread reply routing)
