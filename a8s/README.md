@@ -95,6 +95,7 @@ clasp open                 # open in browser
 | `CAPABILITIES` | Comma-delimited: `gmail,calendar` |
 | `TRIGGER_MINUTES` | Polling interval: 1, 5, 10, 15, or 30 (default: 5) |
 | `MARKDOWN_AUTO` | Set to `false` to disable auto Markdown detection (default: **on**) |
+| `A8S_RESOLVE_UNMAPPED` | Set to `true` to mark unmapped unread mail read after skipping it (default: **off** — leave unread). Only for a mailbox dedicated to the agent. |
 
 Legacy: if `A8S_DEVICE` / `A8S_DEFAULT_AGENT` are unset, `A8S_PARTICIPANT` fills both. If `A8S_COMMAND_AGENTS` is unset, only `A8S_DEVICE` may run commands.
 
@@ -126,7 +127,7 @@ A8S_COMMAND_AGENTS=neil-phone,my-google
 |------|----------|
 | Unread email from mapped address, subject has `@agent` | Outbox `to: agent`, `from: <email-principal>` |
 | Unread email from mapped address, no `@` | Outbox `to: A8S_DEFAULT_AGENT`, `from: <email-principal>` |
-| Unread email from unmapped address | Left unread (not pushed) |
+| Unread email from unmapped address | Left unread (not pushed); `A8S_RESOLVE_UNMAPPED=true` marks it read |
 | Calendar event (optional `@agent` in title) | Outbox to `@agent` or sticky default |
 | Inbox `to: A8S_DEVICE` + `/command` from `A8S_COMMAND_AGENTS` | Execute; reply to `envelope.from` |
 | Inbox `to: A8S_DEVICE` + `/command` from others | Rejected (unauthorized) |
@@ -141,7 +142,7 @@ Every trigger cycle, checks **unread** emails:
 1. Normalize `From:` and require an `A8S_EMAIL_MAP` hit (value = email principal name, e.g. `neil-email`)
 2. Resolve destination via `@agent` or sticky default
 3. Stage attachments under `.outbox/<msg_id>/`
-4. Write SMS-like content (optional subject remainder + body, body truncated at 4KB) with `from` = email principal
+4. Write SMS-like content — a `From:` / `Date:` header (with relative age), optional subject remainder, body truncated at 4KB — with `from` = email principal
 5. Mark read **only after** a successful route
 
 **Re-push:** Mark an email as UNREAD in Gmail → next trigger picks it up again (still must be mapped).
@@ -199,9 +200,9 @@ Authorized senders are listed in `A8S_COMMAND_AGENTS` (e.g. `neil-phone` for dia
 
 | Command | Description |
 |---------|-------------|
-| `/check` | Unread count + last 5 subjects with thread IDs |
-| `/search <query>` | Gmail search, returns thread IDs + subjects |
-| `/read <thread_id>` | Full thread text |
+| `/check` | Unread count + last 5 subjects with thread IDs, each tagged with age (and `your own sent mail` when it is) |
+| `/search <query>` | Gmail search, returns thread IDs + subjects, tagged like `/check` |
+| `/read <thread_id>` | Full thread text; each message header carries age and marks the account's own sent mail |
 | `/send <to> <subject>` | Send new email (body = lines after command; attachments via `files: [{filename}]` in inbox envelope) |
 | `/reply <thread_id>` | Reply to existing thread (body = lines after command; attachments from `.files/<msg_id>/`) |
 

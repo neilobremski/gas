@@ -1,6 +1,46 @@
 'use strict';
 
+process.env.TZ = 'America/Los_Angeles';
+
+const fs = require('fs');
+const path = require('path');
 const { marked } = require('marked');
+
+// --- Load the real Code.js under mocked GAS globals -------------------------
+// The command handlers and push loop are tested against the production code,
+// not hand-kept mirrors; only GAS services are stubbed.
+
+global.marked = marked;
+global.Logger = { log: () => {} };
+global.PropertiesService = {
+  getScriptProperties: () => ({
+    getProperty: () => null,
+    setProperty: () => {},
+    deleteProperty: () => {},
+    getProperties: () => ({})
+  })
+};
+global.Utilities = {
+  newBlob: s => ({ getBytes: () => Buffer.from(String(s), 'utf8') }),
+  formatDate: d => d.toISOString().slice(0, 10)
+};
+global._testActiveEmail = '';
+global._testEffectiveEmail = '';
+global._testActiveThrows = false;
+global.Session = {
+  getActiveUser: () => {
+    if (global._testActiveThrows) throw new Error('identity restricted');
+    return { getEmail: () => global._testActiveEmail };
+  },
+  getEffectiveUser: () => ({ getEmail: () => global._testEffectiveEmail })
+};
+global.GmailApp = null; // set per test
+
+// `const A8S = ...` inside eval stays in the eval scope; the trailing
+// expression hands the object out as the eval's completion value.
+const realA8S = eval(
+  fs.readFileSync(path.join(__dirname, '..', 'Code.js'), 'utf8') + '\nA8S;'
+)._testing;
 
 let passed = 0;
 let failed = 0;
@@ -321,12 +361,13 @@ function formatLogStatus(response) {
   return 'ok';
 }
 
-function formatEmailForAgent(msg, subjectRest) {
-  let body = msg.getPlainBody() || '';
-  if (body.length > 4000) body = body.substring(0, 4000) + '\n[truncated]';
-  const rest = (subjectRest || '').trim();
-  if (rest && body) return rest + '\n\n' + body;
-  return rest || body;
+// The production implementations, loaded above — no mirrors to drift.
+const { describeAge, formatMessageTag } = realA8S;
+const formatEmailForAgent = realA8S.formatEmailForAgent;
+
+function pushNewEmails(gmailApp, config, outbox, filesFolder) {
+  global.GmailApp = gmailApp;
+  return realA8S.pushNewEmails(config, outbox, filesFolder);
 }
 
 const pad = n => (n < 10 ? '0' : '') + n;
@@ -469,9 +510,10 @@ function routeMessage(envelope, config, filesFolder, outbox) {
 
 // --- GAS API Mocks ---
 
-function createMockGmailApp({ threads = [], unreadCount = 0, onSendEmail, onReply } = {}) {
+function createMockGmailApp({ threads = [], unreadCount = 0, aliases = [], onSendEmail, onReply } = {}) {
   return {
     search: () => threads,
+    getAliases: () => aliases,
     getInboxUnreadCount: () => unreadCount,
     getThreadById: (id) => {
       const t = threads.find(t => t._id === id);
@@ -769,24 +811,220 @@ function handleCalendar(command, args) {
 // --- formatEmailForAgent() ---
 
 (() => {
+  const now = new Date('2026-01-15T12:00:00Z');
   const msg = createMockMessage({
     from: 'alice@example.com',
     subject: 'Test Subject',
     date: '2026-01-15T10:30:00Z',
     body: 'Hello there'
   });
-  const result = formatEmailForAgent(msg, 'the thing');
-  assertEqual(result, 'the thing\n\nHello there', 'formatEmail: subject rest + body');
+  const result = formatEmailForAgent(msg, 'the thing', now);
+  assertEqual(
+    result,
+    'From: alice@example.com\nDate: 2026-01-15T10:30:00.000Z (today)\n\nthe thing\n\nHello there',
+    'formatEmail: header + subject rest + body'
+  );
 })();
 
 (() => {
+  const now = new Date('2026-01-18T10:30:00Z');
   const msg = createMockMessage({
     from: 'alice@example.com',
     subject: 'Test',
     date: '2026-01-15T10:30:00Z',
     body: 'Hello there'
   });
-  assertEqual(formatEmailForAgent(msg, ''), 'Hello there', 'formatEmail: body only when no rest');
+  assertEqual(
+    formatEmailForAgent(msg, '', now),
+    'From: alice@example.com\nDate: 2026-01-15T10:30:00.000Z (3 days ago)\n\nHello there',
+    'formatEmail: header + body only when no rest'
+  );
+})();
+
+// --- describeAge() / formatMessageTag() ---
+// Dates without Z are local wall times; TZ is pinned to America/Los_Angeles.
+
+(() => {
+  const now = new Date('2026-08-21T14:00:00');
+  assertEqual(describeAge(new Date('2026-08-21T04:00:00'), now), 'today', 'describeAge: same calendar day');
+  assertEqual(describeAge(new Date('2026-08-20T10:00:00'), now), 'yesterday', 'describeAge: yesterday');
+  assertEqual(describeAge(new Date('2026-08-19T12:19:52'), now), '2 days ago', 'describeAge: two days');
+  assertEqual(describeAge(new Date('2026-07-31T14:00:00'), now), '21 days ago', 'describeAge: weeks old');
+})();
+
+(() => {
+  assertEqual(
+    describeAge(new Date('2026-08-20T23:55:00'), new Date('2026-08-21T00:05:00')),
+    'yesterday',
+    'describeAge: ten minutes across midnight is yesterday, not today'
+  );
+  assertEqual(
+    describeAge(new Date('2026-03-08T01:59:00'), new Date('2026-03-09T01:30:00')),
+    'yesterday',
+    'describeAge: spring-forward 23h day still counts one calendar day'
+  );
+  assertEqual(
+    describeAge(new Date('2026-08-22T09:00:00'), new Date('2026-08-21T10:00:00')),
+    'tomorrow',
+    'describeAge: future-dated mail is named, not clamped to today'
+  );
+  assertEqual(
+    describeAge(new Date('2026-08-25T10:00:00'), new Date('2026-08-21T10:00:00')),
+    '4 days from now',
+    'describeAge: far-future skew is named'
+  );
+})();
+
+(() => {
+  const now = new Date('2026-08-21T14:00:00Z');
+  const selves = { 'agent@example.com': true, 'alias@example.com': true };
+  assertEqual(
+    formatMessageTag('Agent <Agent@Example.com>', new Date('2026-08-19T12:00:00Z'), selves, now),
+    '[your own sent mail, 2 days ago]',
+    'formatMessageTag: own address is marked, case/angle-insensitive'
+  );
+  assertEqual(
+    formatMessageTag('Alias <alias@example.com>', new Date('2026-08-19T12:00:00Z'), selves, now),
+    '[your own sent mail, 2 days ago]',
+    'formatMessageTag: send-as alias is marked'
+  );
+  assertEqual(
+    formatMessageTag('other@example.com', new Date('2026-08-20T12:00:00Z'), selves, now),
+    '[yesterday]',
+    'formatMessageTag: other sender gets age only'
+  );
+  assertEqual(
+    formatMessageTag('agent@example.com', new Date('2026-08-21T12:00:00Z'), {}, now),
+    '[today]',
+    'formatMessageTag: unknown self never marks'
+  );
+})();
+
+// --- selfEmailAddresses(): installable-trigger identity, aliases, guards ---
+
+(() => {
+  global._testActiveEmail = '';
+  global._testEffectiveEmail = 'Agent <Agent@Example.com>';
+  global.GmailApp = createMockGmailApp({ aliases: ['Alias@Example.com'] });
+  let selves = realA8S.selfEmailAddresses();
+  assert(selves['agent@example.com'], 'selfEmailAddresses: blank active user still yields effective user');
+  assert(selves['alias@example.com'], 'selfEmailAddresses: send-as aliases are self');
+
+  global._testActiveEmail = 'active@example.com';
+  selves = realA8S.selfEmailAddresses();
+  assert(selves['active@example.com'] && selves['agent@example.com'], 'selfEmailAddresses: active and effective both collected');
+
+  global._testActiveThrows = true;
+  selves = realA8S.selfEmailAddresses();
+  assert(selves['agent@example.com'], 'selfEmailAddresses: a throwing active lookup does not suppress the effective user');
+  assert(selves['alias@example.com'], 'selfEmailAddresses: a throwing active lookup does not suppress aliases');
+  global._testActiveThrows = false;
+
+  global.GmailApp = null;
+  selves = realA8S.selfEmailAddresses();
+  assert(selves['agent@example.com'], 'selfEmailAddresses: unavailable GmailApp does not suppress Session identities');
+
+  global._testActiveEmail = '';
+  global._testEffectiveEmail = '';
+})();
+
+// --- real /check, /search, /read: self and age tags through production code ---
+
+(() => {
+  global._testActiveEmail = '';
+  global._testEffectiveEmail = 'agent@example.com';
+  const now = new Date();
+  const twoDaysAgo = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 2, 12, 0, 0);
+  const own = createMockMessage({
+    from: 'agent@example.com', subject: 'Old note', date: twoDaysAgo, body: 'mine', unread: true
+  });
+  const other = createMockMessage({
+    from: 'human@example.com', subject: 'Hi', date: now, body: 'yo', unread: true
+  });
+  const alias = createMockMessage({
+    from: 'robot@example.com', subject: 'Alias note', date: twoDaysAgo, body: 'also mine', unread: true
+  });
+  global.GmailApp = createMockGmailApp({
+    threads: [createMockThread('t1', [own]), createMockThread('t2', [other]), createMockThread('t3', [alias])],
+    unreadCount: 3,
+    aliases: ['robot@example.com']
+  });
+  const config = { capabilities: ['gmail'], markdownAuto: false };
+  const outbox = createMockOutbox();
+  const filesFolder = createMockFilesFolder();
+
+  const check = realA8S.handleGmail('/check', [], '', {}, filesFolder, outbox, config, {});
+  assert(check.includes('[your own sent mail, 2 days ago]'), 'real /check: own sent mail tagged with age');
+  assert(check.includes('| [today]'), 'real /check: other sender tagged with age only');
+
+  const read = realA8S.handleGmail('/read', ['t1'], '', {}, filesFolder, outbox, config, {});
+  assert(read.includes('[your own sent mail, 2 days ago] ---'), 'real /read: message header marks own mail');
+
+  const aliasRead = realA8S.handleGmail('/read', ['t3'], '', {}, filesFolder, outbox, config, {});
+  assert(aliasRead.includes('[your own sent mail, 2 days ago] ---'), 'real /read: send-as alias marked as own mail');
+
+  const search = realA8S.handleGmail('/search', ['note'], '', {}, filesFolder, outbox, config, {});
+  assert(search.includes('[your own sent mail, 2 days ago]'), 'real /search: own sent mail tagged');
+
+  global._testEffectiveEmail = '';
+  global.GmailApp = null;
+})();
+
+// --- pushNewEmails(): unmapped unread stays unread by default ---
+
+(() => {
+  const unmapped = createMockMessage({
+    from: 'news@example.org', subject: 'promo', date: new Date(), body: 'buy things', unread: true
+  });
+  const gmailApp = createMockGmailApp({ threads: [createMockThread('t1', [unmapped])] });
+  const config = {
+    capabilities: ['gmail'],
+    defaultAgent: 'bob',
+    emailMap: { 'human@example.com': 'neil-email' },
+    resolveUnmapped: false
+  };
+  const count = pushNewEmails(gmailApp, config, createMockOutbox(), createMockFilesFolder());
+  assertEqual(count, 0, 'pushNewEmails: unmapped not pushed');
+  assert(unmapped.isUnread(), 'pushNewEmails: unmapped stays unread when resolveUnmapped is off');
+})();
+
+// --- pushNewEmails(): opt-in resolveUnmapped marks read, mapped is pushed ---
+
+(() => {
+  const config = {
+    capabilities: ['gmail'],
+    defaultAgent: 'bob',
+    emailMap: { 'human@example.com': 'neil-email' },
+    resolveUnmapped: true
+  };
+  let unmappedRead = false;
+  const mapped = createMockMessage({
+    from: 'human@example.com',
+    subject: 'status',
+    date: '2026-08-21T10:00:00Z',
+    body: 'hi',
+    unread: true
+  });
+  const unmapped = createMockMessage({
+    from: 'notifications@example.org',
+    subject: 'promo',
+    date: '2026-08-10T10:00:00Z',
+    body: 'buy things',
+    unread: true,
+    onMarkRead: () => { unmappedRead = true; }
+  });
+  const gmailApp = createMockGmailApp({
+    threads: [createMockThread('t1', [mapped]), createMockThread('t2', [unmapped])]
+  });
+  const outbox = createMockOutbox();
+  const count = pushNewEmails(gmailApp, config, outbox, createMockFilesFolder());
+  assertEqual(count, 1, 'pushNewEmails: only mapped mail is pushed');
+  assert(unmappedRead, 'pushNewEmails: unmapped mail is marked read');
+  assert(!unmapped.isUnread(), 'pushNewEmails: unmapped no longer unread');
+  assert(!mapped.isUnread(), 'pushNewEmails: mapped marked read after route');
+  assertEqual(outbox.getFiles().length, 1, 'pushNewEmails: one envelope written');
+  assert(outbox.getFiles()[0].content.includes('From: human@example.com'), 'pushNewEmails: envelope content carries sender header');
+  assert(outbox.getFiles()[0].content.includes('Date: 2026-08-21T10:00:00.000Z'), 'pushNewEmails: envelope content carries date header');
 })();
 
 (() => {
