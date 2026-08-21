@@ -1,12 +1,12 @@
 /*
- * A8S v1.1 — Agent-to-agent messaging via Google Drive
+ * A8S v1.2 — Agent-to-agent messaging via Google Drive
  *
  * Polls .inbox/ for commands, routes email/calendar like an SMS bridge,
  * writes .outbox/ envelopes.
  */
 const A8S = (() => {
 
-  const VERSION = '1.1';
+  const VERSION = '1.2';
 
   const CROCKFORD = '0123456789ABCDEFGHJKMNPQRSTVWXYZ';
 
@@ -30,6 +30,30 @@ const A8S = (() => {
     if (angle) s = angle[1].trim();
     if (s.toLowerCase().indexOf('mailto:') === 0) s = s.slice(7).trim();
     return s.toLowerCase();
+  }
+
+  function selfEmailAddress() {
+    try {
+      return normalizeEmailAddress(Session.getActiveUser().getEmail());
+    } catch (e) {
+      return '';
+    }
+  }
+
+  function describeAge(date, now) {
+    const days = Math.floor((now.getTime() - date.getTime()) / 86400000);
+    if (days <= 0) return 'today';
+    if (days === 1) return 'yesterday';
+    return `${days} days ago`;
+  }
+
+  /** Age + authorship tag so an agent never mistakes its own or stale mail for fresh inbound. */
+  function formatMessageTag(fromHeader, date, self, now) {
+    const age = describeAge(date, now);
+    if (self && normalizeEmailAddress(fromHeader) === self) {
+      return `[your own sent mail, ${age}]`;
+    }
+    return `[${age}]`;
   }
 
   function parseEmailMap(raw) {
@@ -593,11 +617,14 @@ const A8S = (() => {
   // --- Gmail Handler ---
 
   function handleGmail(command, args, body, envelope, filesFolder, outbox, config, logCtx) {
+    const self = selfEmailAddress();
+    const now = new Date();
+
     if (command === '/check') {
       const threads = GmailApp.search('is:unread', 0, 5);
       const subjects = threads.map(t => {
         const msg = t.getMessages()[t.getMessageCount() - 1];
-        return `${t.getId()} | ${msg.getSubject()} | ${msg.getFrom()}`;
+        return `${t.getId()} | ${msg.getSubject()} | ${msg.getFrom()} | ${formatMessageTag(msg.getFrom(), msg.getDate(), self, now)}`;
       });
       const total = GmailApp.getInboxUnreadCount();
       return `${total} unread\n${subjects.join('\n')}`;
@@ -610,7 +637,7 @@ const A8S = (() => {
       if (!results.length) return `no results for: ${query}`;
       const lines = results.map(t => {
         const msg = t.getMessages()[t.getMessageCount() - 1];
-        return `${t.getId()} | ${msg.getSubject()} | ${msg.getFrom()} | ${msg.getDate().toISOString()}`;
+        return `${t.getId()} | ${msg.getSubject()} | ${msg.getFrom()} | ${msg.getDate().toISOString()} ${formatMessageTag(msg.getFrom(), msg.getDate(), self, now)}`;
       });
       return lines.join('\n');
     }
@@ -622,7 +649,7 @@ const A8S = (() => {
         const thread = GmailApp.getThreadById(threadId);
         const messages = thread.getMessages();
         const parts = messages.map(m =>
-          `--- ${m.getFrom()} (${m.getDate().toISOString()}) ---\n${m.getPlainBody()}`
+          `--- ${m.getFrom()} (${m.getDate().toISOString()}) ${formatMessageTag(m.getFrom(), m.getDate(), self, now)} ---\n${m.getPlainBody()}`
         );
         return `thread_id: ${threadId}\n\n${parts.join('\n\n')}`;
       } catch (e) {
@@ -690,12 +717,15 @@ const A8S = (() => {
 
   // --- Email Push (mapped unread → sticky/@ route → mark READ) ---
 
-  function formatEmailForAgent(msg, subjectRest) {
+  function formatEmailForAgent(msg, subjectRest, now) {
+    const at = now || new Date();
     let body = msg.getPlainBody() || '';
     if (body.length > 4000) body = body.substring(0, 4000) + '\n[truncated]';
+    const date = msg.getDate();
+    const header = `From: ${msg.getFrom()}\nDate: ${date.toISOString()} (${describeAge(date, at)})`;
     const rest = (subjectRest || '').trim();
-    if (rest && body) return rest + '\n\n' + body;
-    return rest || body;
+    if (rest && body) return `${header}\n\n${rest}\n\n${body}`;
+    return `${header}\n\n${rest || body}`;
   }
 
   function pushNewEmails(config, outbox, filesFolder) {
@@ -714,6 +744,17 @@ const A8S = (() => {
         const decision = resolveEmailPush(msg.getFrom(), msg.getSubject(), config);
         if (!decision.ok) {
           console.log(`email push skipped from "${msg.getFrom()}": ${decision.reason}`);
+          if (decision.reason === 'unmapped') {
+            // Leaving it unread would re-list it every cycle and eventually
+            // starve the 10-thread search cap.
+            msg.markRead();
+            _logTransaction(
+              'a8s.push.email',
+              `addr=${normalizeEmailAddress(msg.getFrom())}`,
+              'skipped: unmapped (marked read)',
+              ''
+            );
+          }
           return;
         }
         const content = formatEmailForAgent(msg, decision.subjectRest);
@@ -1155,6 +1196,7 @@ const A8S = (() => {
     _testing: {
       ulid, parseCommand, formatEmailForAgent, formatEventForAgent, writeEnvelope, routeMessage,
       pad, extractDriveLinks, exportDocAsMarkdown, downloadDriveFile, hashPrefix, getConfig,
+      describeAge, formatMessageTag,
       detectMarkdown, bodyForMarkdownDetection, parseMarkdownFlags, effectiveMarkdownMode,
       sanitizeHtml, buildHtmlBody, buildMailOpts, formatMarkdownLogNotes, formatCommandParams,
       formatLogStatus, toLogAction, normalizeEmailAddress, parseEmailMap, parseCommandAgents,

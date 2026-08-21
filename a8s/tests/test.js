@@ -321,12 +321,58 @@ function formatLogStatus(response) {
   return 'ok';
 }
 
-function formatEmailForAgent(msg, subjectRest) {
+function describeAge(date, now) {
+  const days = Math.floor((now.getTime() - date.getTime()) / 86400000);
+  if (days <= 0) return 'today';
+  if (days === 1) return 'yesterday';
+  return `${days} days ago`;
+}
+
+function formatMessageTag(fromHeader, date, self, now) {
+  const age = describeAge(date, now);
+  if (self && normalizeEmailAddress(fromHeader) === self) {
+    return `[your own sent mail, ${age}]`;
+  }
+  return `[${age}]`;
+}
+
+function formatEmailForAgent(msg, subjectRest, now) {
+  const at = now || new Date();
   let body = msg.getPlainBody() || '';
   if (body.length > 4000) body = body.substring(0, 4000) + '\n[truncated]';
+  const date = msg.getDate();
+  const header = `From: ${msg.getFrom()}\nDate: ${date.toISOString()} (${describeAge(date, at)})`;
   const rest = (subjectRest || '').trim();
-  if (rest && body) return rest + '\n\n' + body;
-  return rest || body;
+  if (rest && body) return `${header}\n\n${rest}\n\n${body}`;
+  return `${header}\n\n${rest || body}`;
+}
+
+// Mirrors Code.js pushNewEmails with GmailApp injected; _logTransaction elided.
+function pushNewEmails(gmailApp, config, outbox, filesFolder) {
+  if (!config.defaultAgent || !config.capabilities.includes('gmail')) return 0;
+  if (!config.emailMap || !Object.keys(config.emailMap).length) return 0;
+
+  const threads = gmailApp.search('is:unread', 0, 10);
+  if (!threads.length) return 0;
+
+  let count = 0;
+  threads.forEach(thread => {
+    const messages = thread.getMessages();
+    const unread = messages.filter(m => m.isUnread());
+
+    unread.forEach(msg => {
+      const decision = resolveEmailPush(msg.getFrom(), msg.getSubject(), config);
+      if (!decision.ok) {
+        if (decision.reason === 'unmapped') msg.markRead();
+        return;
+      }
+      const content = formatEmailForAgent(msg, decision.subjectRest);
+      writeEnvelope(outbox, decision.to, content, [], filesFolder, decision.fromAgent);
+      msg.markRead();
+      count++;
+    });
+  });
+  return count;
 }
 
 const pad = n => (n < 10 ? '0' : '') + n;
@@ -769,24 +815,103 @@ function handleCalendar(command, args) {
 // --- formatEmailForAgent() ---
 
 (() => {
+  const now = new Date('2026-01-15T12:00:00Z');
   const msg = createMockMessage({
     from: 'alice@example.com',
     subject: 'Test Subject',
     date: '2026-01-15T10:30:00Z',
     body: 'Hello there'
   });
-  const result = formatEmailForAgent(msg, 'the thing');
-  assertEqual(result, 'the thing\n\nHello there', 'formatEmail: subject rest + body');
+  const result = formatEmailForAgent(msg, 'the thing', now);
+  assertEqual(
+    result,
+    'From: alice@example.com\nDate: 2026-01-15T10:30:00.000Z (today)\n\nthe thing\n\nHello there',
+    'formatEmail: header + subject rest + body'
+  );
 })();
 
 (() => {
+  const now = new Date('2026-01-18T10:30:00Z');
   const msg = createMockMessage({
     from: 'alice@example.com',
     subject: 'Test',
     date: '2026-01-15T10:30:00Z',
     body: 'Hello there'
   });
-  assertEqual(formatEmailForAgent(msg, ''), 'Hello there', 'formatEmail: body only when no rest');
+  assertEqual(
+    formatEmailForAgent(msg, '', now),
+    'From: alice@example.com\nDate: 2026-01-15T10:30:00.000Z (3 days ago)\n\nHello there',
+    'formatEmail: header + body only when no rest'
+  );
+})();
+
+// --- describeAge() / formatMessageTag() ---
+
+(() => {
+  const now = new Date('2026-08-21T14:00:00Z');
+  assertEqual(describeAge(new Date('2026-08-21T04:00:00Z'), now), 'today', 'describeAge: same day');
+  assertEqual(describeAge(new Date('2026-08-20T10:00:00Z'), now), 'yesterday', 'describeAge: yesterday');
+  assertEqual(describeAge(new Date('2026-08-19T12:19:52Z'), now), '2 days ago', 'describeAge: two days');
+  assertEqual(describeAge(new Date('2026-07-31T14:00:00Z'), now), '21 days ago', 'describeAge: weeks old');
+  assertEqual(describeAge(new Date('2026-08-21T15:00:00Z'), now), 'today', 'describeAge: clock skew clamps to today');
+})();
+
+(() => {
+  const now = new Date('2026-08-21T14:00:00Z');
+  const self = 'agent@example.com';
+  assertEqual(
+    formatMessageTag('Agent <Agent@Example.com>', new Date('2026-08-19T12:00:00Z'), self, now),
+    '[your own sent mail, 2 days ago]',
+    'formatMessageTag: own address is marked, case/angle-insensitive'
+  );
+  assertEqual(
+    formatMessageTag('other@example.com', new Date('2026-08-20T12:00:00Z'), self, now),
+    '[yesterday]',
+    'formatMessageTag: other sender gets age only'
+  );
+  assertEqual(
+    formatMessageTag('agent@example.com', new Date('2026-08-21T12:00:00Z'), '', now),
+    '[today]',
+    'formatMessageTag: unknown self never marks'
+  );
+})();
+
+// --- pushNewEmails(): unmapped unread is resolved, mapped is pushed ---
+
+(() => {
+  const config = {
+    capabilities: ['gmail'],
+    defaultAgent: 'bob',
+    emailMap: { 'human@example.com': 'neil-email' }
+  };
+  let unmappedRead = false;
+  const mapped = createMockMessage({
+    from: 'human@example.com',
+    subject: 'status',
+    date: '2026-08-21T10:00:00Z',
+    body: 'hi',
+    unread: true
+  });
+  const unmapped = createMockMessage({
+    from: 'notifications@example.org',
+    subject: 'promo',
+    date: '2026-08-10T10:00:00Z',
+    body: 'buy things',
+    unread: true,
+    onMarkRead: () => { unmappedRead = true; }
+  });
+  const gmailApp = createMockGmailApp({
+    threads: [createMockThread('t1', [mapped]), createMockThread('t2', [unmapped])]
+  });
+  const outbox = createMockOutbox();
+  const count = pushNewEmails(gmailApp, config, outbox, createMockFilesFolder());
+  assertEqual(count, 1, 'pushNewEmails: only mapped mail is pushed');
+  assert(unmappedRead, 'pushNewEmails: unmapped mail is marked read');
+  assert(!unmapped.isUnread(), 'pushNewEmails: unmapped no longer unread');
+  assert(!mapped.isUnread(), 'pushNewEmails: mapped marked read after route');
+  assertEqual(outbox.getFiles().length, 1, 'pushNewEmails: one envelope written');
+  assert(outbox.getFiles()[0].content.includes('From: human@example.com'), 'pushNewEmails: envelope content carries sender header');
+  assert(outbox.getFiles()[0].content.includes('Date: 2026-08-21T10:00:00.000Z'), 'pushNewEmails: envelope content carries date header');
 })();
 
 (() => {
