@@ -32,16 +32,19 @@ const A8S = (() => {
     return s.toLowerCase();
   }
 
-  function selfEmailAddress() {
-    // Installable triggers may blank the active user; the effective user is
-    // the account the trigger runs as, which is this mailbox.
-    try {
-      const active = normalizeEmailAddress(Session.getActiveUser().getEmail());
-      if (active) return active;
-      return normalizeEmailAddress(Session.getEffectiveUser().getEmail());
-    } catch (e) {
-      return '';
-    }
+  // Every address this account sends as, normalized. Each source is guarded
+  // on its own: installable triggers may blank or deny the active user, and
+  // one unavailable source must not suppress the others.
+  function selfEmailAddresses() {
+    const selves = {};
+    const add = value => {
+      const addr = normalizeEmailAddress(value);
+      if (addr) selves[addr] = true;
+    };
+    try { add(Session.getActiveUser().getEmail()); } catch (e) {}
+    try { add(Session.getEffectiveUser().getEmail()); } catch (e) {}
+    try { (GmailApp.getAliases() || []).forEach(add); } catch (e) {}
+    return selves;
   }
 
   // Calendar days in the script's zone (V8 Date methods run in appsscript.json
@@ -56,9 +59,9 @@ const A8S = (() => {
   }
 
   /** Age + authorship tag so an agent never mistakes its own or stale mail for fresh inbound. */
-  function formatMessageTag(fromHeader, date, self, now) {
+  function formatMessageTag(fromHeader, date, selves, now) {
     const age = describeAge(date, now);
-    if (self && normalizeEmailAddress(fromHeader) === self) {
+    if (selves && selves[normalizeEmailAddress(fromHeader)]) {
       return `[your own sent mail, ${age}]`;
     }
     return `[${age}]`;
@@ -626,7 +629,7 @@ const A8S = (() => {
   // --- Gmail Handler ---
 
   function handleGmail(command, args, body, envelope, filesFolder, outbox, config, logCtx) {
-    const self = selfEmailAddress();
+    const self = selfEmailAddresses();
     const now = new Date();
 
     if (command === '/check') {
@@ -1206,7 +1209,7 @@ const A8S = (() => {
     disableLogging,
     _testing: {
       ulid, parseCommand, formatEmailForAgent, formatEventForAgent, writeEnvelope, routeMessage,
-      handleGmail, pushNewEmails, selfEmailAddress,
+      handleGmail, pushNewEmails, selfEmailAddresses,
       pad, extractDriveLinks, exportDocAsMarkdown, downloadDriveFile, hashPrefix, getConfig,
       describeAge, formatMessageTag,
       detectMarkdown, bodyForMarkdownDetection, parseMarkdownFlags, effectiveMarkdownMode,

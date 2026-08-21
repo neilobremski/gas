@@ -26,8 +26,12 @@ global.Utilities = {
 };
 global._testActiveEmail = '';
 global._testEffectiveEmail = '';
+global._testActiveThrows = false;
 global.Session = {
-  getActiveUser: () => ({ getEmail: () => global._testActiveEmail }),
+  getActiveUser: () => {
+    if (global._testActiveThrows) throw new Error('identity restricted');
+    return { getEmail: () => global._testActiveEmail };
+  },
   getEffectiveUser: () => ({ getEmail: () => global._testEffectiveEmail })
 };
 global.GmailApp = null; // set per test
@@ -506,9 +510,10 @@ function routeMessage(envelope, config, filesFolder, outbox) {
 
 // --- GAS API Mocks ---
 
-function createMockGmailApp({ threads = [], unreadCount = 0, onSendEmail, onReply } = {}) {
+function createMockGmailApp({ threads = [], unreadCount = 0, aliases = [], onSendEmail, onReply } = {}) {
   return {
     search: () => threads,
+    getAliases: () => aliases,
     getInboxUnreadCount: () => unreadCount,
     getThreadById: (id) => {
       const t = threads.find(t => t._id === id);
@@ -872,36 +877,53 @@ function handleCalendar(command, args) {
 
 (() => {
   const now = new Date('2026-08-21T14:00:00Z');
-  const self = 'agent@example.com';
+  const selves = { 'agent@example.com': true, 'alias@example.com': true };
   assertEqual(
-    formatMessageTag('Agent <Agent@Example.com>', new Date('2026-08-19T12:00:00Z'), self, now),
+    formatMessageTag('Agent <Agent@Example.com>', new Date('2026-08-19T12:00:00Z'), selves, now),
     '[your own sent mail, 2 days ago]',
     'formatMessageTag: own address is marked, case/angle-insensitive'
   );
   assertEqual(
-    formatMessageTag('other@example.com', new Date('2026-08-20T12:00:00Z'), self, now),
+    formatMessageTag('Alias <alias@example.com>', new Date('2026-08-19T12:00:00Z'), selves, now),
+    '[your own sent mail, 2 days ago]',
+    'formatMessageTag: send-as alias is marked'
+  );
+  assertEqual(
+    formatMessageTag('other@example.com', new Date('2026-08-20T12:00:00Z'), selves, now),
     '[yesterday]',
     'formatMessageTag: other sender gets age only'
   );
   assertEqual(
-    formatMessageTag('agent@example.com', new Date('2026-08-21T12:00:00Z'), '', now),
+    formatMessageTag('agent@example.com', new Date('2026-08-21T12:00:00Z'), {}, now),
     '[today]',
     'formatMessageTag: unknown self never marks'
   );
 })();
 
-// --- selfEmailAddress(): installable-trigger identity ---
+// --- selfEmailAddresses(): installable-trigger identity, aliases, guards ---
 
 (() => {
   global._testActiveEmail = '';
   global._testEffectiveEmail = 'Agent <Agent@Example.com>';
-  assertEqual(
-    realA8S.selfEmailAddress(),
-    'agent@example.com',
-    'selfEmailAddress: blank active user falls back to effective user'
-  );
+  global.GmailApp = createMockGmailApp({ aliases: ['Alias@Example.com'] });
+  let selves = realA8S.selfEmailAddresses();
+  assert(selves['agent@example.com'], 'selfEmailAddresses: blank active user still yields effective user');
+  assert(selves['alias@example.com'], 'selfEmailAddresses: send-as aliases are self');
+
   global._testActiveEmail = 'active@example.com';
-  assertEqual(realA8S.selfEmailAddress(), 'active@example.com', 'selfEmailAddress: active user wins when present');
+  selves = realA8S.selfEmailAddresses();
+  assert(selves['active@example.com'] && selves['agent@example.com'], 'selfEmailAddresses: active and effective both collected');
+
+  global._testActiveThrows = true;
+  selves = realA8S.selfEmailAddresses();
+  assert(selves['agent@example.com'], 'selfEmailAddresses: a throwing active lookup does not suppress the effective user');
+  assert(selves['alias@example.com'], 'selfEmailAddresses: a throwing active lookup does not suppress aliases');
+  global._testActiveThrows = false;
+
+  global.GmailApp = null;
+  selves = realA8S.selfEmailAddresses();
+  assert(selves['agent@example.com'], 'selfEmailAddresses: unavailable GmailApp does not suppress Session identities');
+
   global._testActiveEmail = '';
   global._testEffectiveEmail = '';
 })();
@@ -919,9 +941,13 @@ function handleCalendar(command, args) {
   const other = createMockMessage({
     from: 'human@example.com', subject: 'Hi', date: now, body: 'yo', unread: true
   });
+  const alias = createMockMessage({
+    from: 'robot@example.com', subject: 'Alias note', date: twoDaysAgo, body: 'also mine', unread: true
+  });
   global.GmailApp = createMockGmailApp({
-    threads: [createMockThread('t1', [own]), createMockThread('t2', [other])],
-    unreadCount: 2
+    threads: [createMockThread('t1', [own]), createMockThread('t2', [other]), createMockThread('t3', [alias])],
+    unreadCount: 3,
+    aliases: ['robot@example.com']
   });
   const config = { capabilities: ['gmail'], markdownAuto: false };
   const outbox = createMockOutbox();
@@ -933,6 +959,9 @@ function handleCalendar(command, args) {
 
   const read = realA8S.handleGmail('/read', ['t1'], '', {}, filesFolder, outbox, config, {});
   assert(read.includes('[your own sent mail, 2 days ago] ---'), 'real /read: message header marks own mail');
+
+  const aliasRead = realA8S.handleGmail('/read', ['t3'], '', {}, filesFolder, outbox, config, {});
+  assert(aliasRead.includes('[your own sent mail, 2 days ago] ---'), 'real /read: send-as alias marked as own mail');
 
   const search = realA8S.handleGmail('/search', ['note'], '', {}, filesFolder, outbox, config, {});
   assert(search.includes('[your own sent mail, 2 days ago]'), 'real /search: own sent mail tagged');
