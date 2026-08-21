@@ -1,6 +1,42 @@
 'use strict';
 
+process.env.TZ = 'America/Los_Angeles';
+
+const fs = require('fs');
+const path = require('path');
 const { marked } = require('marked');
+
+// --- Load the real Code.js under mocked GAS globals -------------------------
+// The command handlers and push loop are tested against the production code,
+// not hand-kept mirrors; only GAS services are stubbed.
+
+global.marked = marked;
+global.Logger = { log: () => {} };
+global.PropertiesService = {
+  getScriptProperties: () => ({
+    getProperty: () => null,
+    setProperty: () => {},
+    deleteProperty: () => {},
+    getProperties: () => ({})
+  })
+};
+global.Utilities = {
+  newBlob: s => ({ getBytes: () => Buffer.from(String(s), 'utf8') }),
+  formatDate: d => d.toISOString().slice(0, 10)
+};
+global._testActiveEmail = '';
+global._testEffectiveEmail = '';
+global.Session = {
+  getActiveUser: () => ({ getEmail: () => global._testActiveEmail }),
+  getEffectiveUser: () => ({ getEmail: () => global._testEffectiveEmail })
+};
+global.GmailApp = null; // set per test
+
+// `const A8S = ...` inside eval stays in the eval scope; the trailing
+// expression hands the object out as the eval's completion value.
+const realA8S = eval(
+  fs.readFileSync(path.join(__dirname, '..', 'Code.js'), 'utf8') + '\nA8S;'
+)._testing;
 
 let passed = 0;
 let failed = 0;
@@ -321,58 +357,13 @@ function formatLogStatus(response) {
   return 'ok';
 }
 
-function describeAge(date, now) {
-  const days = Math.floor((now.getTime() - date.getTime()) / 86400000);
-  if (days <= 0) return 'today';
-  if (days === 1) return 'yesterday';
-  return `${days} days ago`;
-}
+// The production implementations, loaded above — no mirrors to drift.
+const { describeAge, formatMessageTag } = realA8S;
+const formatEmailForAgent = realA8S.formatEmailForAgent;
 
-function formatMessageTag(fromHeader, date, self, now) {
-  const age = describeAge(date, now);
-  if (self && normalizeEmailAddress(fromHeader) === self) {
-    return `[your own sent mail, ${age}]`;
-  }
-  return `[${age}]`;
-}
-
-function formatEmailForAgent(msg, subjectRest, now) {
-  const at = now || new Date();
-  let body = msg.getPlainBody() || '';
-  if (body.length > 4000) body = body.substring(0, 4000) + '\n[truncated]';
-  const date = msg.getDate();
-  const header = `From: ${msg.getFrom()}\nDate: ${date.toISOString()} (${describeAge(date, at)})`;
-  const rest = (subjectRest || '').trim();
-  if (rest && body) return `${header}\n\n${rest}\n\n${body}`;
-  return `${header}\n\n${rest || body}`;
-}
-
-// Mirrors Code.js pushNewEmails with GmailApp injected; _logTransaction elided.
 function pushNewEmails(gmailApp, config, outbox, filesFolder) {
-  if (!config.defaultAgent || !config.capabilities.includes('gmail')) return 0;
-  if (!config.emailMap || !Object.keys(config.emailMap).length) return 0;
-
-  const threads = gmailApp.search('is:unread', 0, 10);
-  if (!threads.length) return 0;
-
-  let count = 0;
-  threads.forEach(thread => {
-    const messages = thread.getMessages();
-    const unread = messages.filter(m => m.isUnread());
-
-    unread.forEach(msg => {
-      const decision = resolveEmailPush(msg.getFrom(), msg.getSubject(), config);
-      if (!decision.ok) {
-        if (decision.reason === 'unmapped') msg.markRead();
-        return;
-      }
-      const content = formatEmailForAgent(msg, decision.subjectRest);
-      writeEnvelope(outbox, decision.to, content, [], filesFolder, decision.fromAgent);
-      msg.markRead();
-      count++;
-    });
-  });
-  return count;
+  global.GmailApp = gmailApp;
+  return realA8S.pushNewEmails(config, outbox, filesFolder);
 }
 
 const pad = n => (n < 10 ? '0' : '') + n;
@@ -846,14 +837,37 @@ function handleCalendar(command, args) {
 })();
 
 // --- describeAge() / formatMessageTag() ---
+// Dates without Z are local wall times; TZ is pinned to America/Los_Angeles.
 
 (() => {
-  const now = new Date('2026-08-21T14:00:00Z');
-  assertEqual(describeAge(new Date('2026-08-21T04:00:00Z'), now), 'today', 'describeAge: same day');
-  assertEqual(describeAge(new Date('2026-08-20T10:00:00Z'), now), 'yesterday', 'describeAge: yesterday');
-  assertEqual(describeAge(new Date('2026-08-19T12:19:52Z'), now), '2 days ago', 'describeAge: two days');
-  assertEqual(describeAge(new Date('2026-07-31T14:00:00Z'), now), '21 days ago', 'describeAge: weeks old');
-  assertEqual(describeAge(new Date('2026-08-21T15:00:00Z'), now), 'today', 'describeAge: clock skew clamps to today');
+  const now = new Date('2026-08-21T14:00:00');
+  assertEqual(describeAge(new Date('2026-08-21T04:00:00'), now), 'today', 'describeAge: same calendar day');
+  assertEqual(describeAge(new Date('2026-08-20T10:00:00'), now), 'yesterday', 'describeAge: yesterday');
+  assertEqual(describeAge(new Date('2026-08-19T12:19:52'), now), '2 days ago', 'describeAge: two days');
+  assertEqual(describeAge(new Date('2026-07-31T14:00:00'), now), '21 days ago', 'describeAge: weeks old');
+})();
+
+(() => {
+  assertEqual(
+    describeAge(new Date('2026-08-20T23:55:00'), new Date('2026-08-21T00:05:00')),
+    'yesterday',
+    'describeAge: ten minutes across midnight is yesterday, not today'
+  );
+  assertEqual(
+    describeAge(new Date('2026-03-08T01:59:00'), new Date('2026-03-09T01:30:00')),
+    'yesterday',
+    'describeAge: spring-forward 23h day still counts one calendar day'
+  );
+  assertEqual(
+    describeAge(new Date('2026-08-22T09:00:00'), new Date('2026-08-21T10:00:00')),
+    'tomorrow',
+    'describeAge: future-dated mail is named, not clamped to today'
+  );
+  assertEqual(
+    describeAge(new Date('2026-08-25T10:00:00'), new Date('2026-08-21T10:00:00')),
+    '4 days from now',
+    'describeAge: far-future skew is named'
+  );
 })();
 
 (() => {
@@ -876,13 +890,83 @@ function handleCalendar(command, args) {
   );
 })();
 
-// --- pushNewEmails(): unmapped unread is resolved, mapped is pushed ---
+// --- selfEmailAddress(): installable-trigger identity ---
+
+(() => {
+  global._testActiveEmail = '';
+  global._testEffectiveEmail = 'Agent <Agent@Example.com>';
+  assertEqual(
+    realA8S.selfEmailAddress(),
+    'agent@example.com',
+    'selfEmailAddress: blank active user falls back to effective user'
+  );
+  global._testActiveEmail = 'active@example.com';
+  assertEqual(realA8S.selfEmailAddress(), 'active@example.com', 'selfEmailAddress: active user wins when present');
+  global._testActiveEmail = '';
+  global._testEffectiveEmail = '';
+})();
+
+// --- real /check, /search, /read: self and age tags through production code ---
+
+(() => {
+  global._testActiveEmail = '';
+  global._testEffectiveEmail = 'agent@example.com';
+  const now = new Date();
+  const twoDaysAgo = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 2, 12, 0, 0);
+  const own = createMockMessage({
+    from: 'agent@example.com', subject: 'Old note', date: twoDaysAgo, body: 'mine', unread: true
+  });
+  const other = createMockMessage({
+    from: 'human@example.com', subject: 'Hi', date: now, body: 'yo', unread: true
+  });
+  global.GmailApp = createMockGmailApp({
+    threads: [createMockThread('t1', [own]), createMockThread('t2', [other])],
+    unreadCount: 2
+  });
+  const config = { capabilities: ['gmail'], markdownAuto: false };
+  const outbox = createMockOutbox();
+  const filesFolder = createMockFilesFolder();
+
+  const check = realA8S.handleGmail('/check', [], '', {}, filesFolder, outbox, config, {});
+  assert(check.includes('[your own sent mail, 2 days ago]'), 'real /check: own sent mail tagged with age');
+  assert(check.includes('| [today]'), 'real /check: other sender tagged with age only');
+
+  const read = realA8S.handleGmail('/read', ['t1'], '', {}, filesFolder, outbox, config, {});
+  assert(read.includes('[your own sent mail, 2 days ago] ---'), 'real /read: message header marks own mail');
+
+  const search = realA8S.handleGmail('/search', ['note'], '', {}, filesFolder, outbox, config, {});
+  assert(search.includes('[your own sent mail, 2 days ago]'), 'real /search: own sent mail tagged');
+
+  global._testEffectiveEmail = '';
+  global.GmailApp = null;
+})();
+
+// --- pushNewEmails(): unmapped unread stays unread by default ---
+
+(() => {
+  const unmapped = createMockMessage({
+    from: 'news@example.org', subject: 'promo', date: new Date(), body: 'buy things', unread: true
+  });
+  const gmailApp = createMockGmailApp({ threads: [createMockThread('t1', [unmapped])] });
+  const config = {
+    capabilities: ['gmail'],
+    defaultAgent: 'bob',
+    emailMap: { 'human@example.com': 'neil-email' },
+    resolveUnmapped: false
+  };
+  const count = pushNewEmails(gmailApp, config, createMockOutbox(), createMockFilesFolder());
+  assertEqual(count, 0, 'pushNewEmails: unmapped not pushed');
+  assert(unmapped.isUnread(), 'pushNewEmails: unmapped stays unread when resolveUnmapped is off');
+})();
+
+// --- pushNewEmails(): opt-in resolveUnmapped marks read, mapped is pushed ---
 
 (() => {
   const config = {
     capabilities: ['gmail'],
     defaultAgent: 'bob',
-    emailMap: { 'human@example.com': 'neil-email' }
+    emailMap: { 'human@example.com': 'neil-email' },
+    resolveUnmapped: true
   };
   let unmappedRead = false;
   const mapped = createMockMessage({

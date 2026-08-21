@@ -95,6 +95,7 @@ clasp open                 # open in browser
 | `CAPABILITIES` | Comma-delimited: `gmail,calendar` |
 | `TRIGGER_MINUTES` | Polling interval: 1, 5, 10, 15, or 30 (default: 5) |
 | `MARKDOWN_AUTO` | Set to `false` to disable auto Markdown detection (default: **on**) |
+| `A8S_RESOLVE_UNMAPPED` | Set to `true` to mark unmapped unread mail read after skipping it (default: **off** — leave unread). Only for a mailbox dedicated to the agent. |
 
 Legacy: if `A8S_DEVICE` / `A8S_DEFAULT_AGENT` are unset, `A8S_PARTICIPANT` fills both. If `A8S_COMMAND_AGENTS` is unset, only `A8S_DEVICE` may run commands.
 
@@ -126,7 +127,7 @@ A8S_COMMAND_AGENTS=neil-phone,my-google
 |------|----------|
 | Unread email from mapped address, subject has `@agent` | Outbox `to: agent`, `from: <email-principal>` |
 | Unread email from mapped address, no `@` | Outbox `to: A8S_DEFAULT_AGENT`, `from: <email-principal>` |
-| Unread email from unmapped address | Marked read, not pushed |
+| Unread email from unmapped address | Left unread (not pushed); `A8S_RESOLVE_UNMAPPED=true` marks it read |
 | Calendar event (optional `@agent` in title) | Outbox to `@agent` or sticky default |
 | Inbox `to: A8S_DEVICE` + `/command` from `A8S_COMMAND_AGENTS` | Execute; reply to `envelope.from` |
 | Inbox `to: A8S_DEVICE` + `/command` from others | Rejected (unauthorized) |

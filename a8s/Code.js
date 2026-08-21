@@ -33,16 +33,24 @@ const A8S = (() => {
   }
 
   function selfEmailAddress() {
+    // Installable triggers may blank the active user; the effective user is
+    // the account the trigger runs as, which is this mailbox.
     try {
-      return normalizeEmailAddress(Session.getActiveUser().getEmail());
+      const active = normalizeEmailAddress(Session.getActiveUser().getEmail());
+      if (active) return active;
+      return normalizeEmailAddress(Session.getEffectiveUser().getEmail());
     } catch (e) {
       return '';
     }
   }
 
+  // Calendar days in the script's zone (V8 Date methods run in appsscript.json
+  // timeZone), not rolling 24h buckets — 23:55 read at 00:05 is "yesterday".
   function describeAge(date, now) {
-    const days = Math.floor((now.getTime() - date.getTime()) / 86400000);
-    if (days <= 0) return 'today';
+    const midnight = d => new Date(d.getFullYear(), d.getMonth(), d.getDate());
+    const days = Math.round((midnight(now) - midnight(date)) / 86400000);
+    if (days < 0) return days === -1 ? 'tomorrow' : `${-days} days from now`;
+    if (days === 0) return 'today';
     if (days === 1) return 'yesterday';
     return `${days} days ago`;
   }
@@ -184,7 +192,8 @@ const A8S = (() => {
       participant: defaultAgent,
       capabilities: caps,
       triggerMinutes,
-      markdownAuto: (props.getProperty('MARKDOWN_AUTO') || '').toLowerCase() !== 'false'
+      markdownAuto: (props.getProperty('MARKDOWN_AUTO') || '').toLowerCase() !== 'false',
+      resolveUnmapped: (props.getProperty('A8S_RESOLVE_UNMAPPED') || '').toLowerCase() === 'true'
     };
   }
 
@@ -744,9 +753,10 @@ const A8S = (() => {
         const decision = resolveEmailPush(msg.getFrom(), msg.getSubject(), config);
         if (!decision.ok) {
           console.log(`email push skipped from "${msg.getFrom()}": ${decision.reason}`);
-          if (decision.reason === 'unmapped') {
-            // Leaving it unread would re-list it every cycle and eventually
-            // starve the 10-thread search cap.
+          if (decision.reason === 'unmapped' && config.resolveUnmapped) {
+            // Opt-in: a dedicated agent mailbox can clear unmapped bait from
+            // every unread scan, but marking a shared mailbox's mail read
+            // must never be the default.
             msg.markRead();
             _logTransaction(
               'a8s.push.email',
@@ -1127,6 +1137,7 @@ const A8S = (() => {
       Logger.log('  A8S_EMAIL_MAP — JSON {"human@example.com":"neil-email"}');
       Logger.log('  A8S_COMMAND_AGENTS — comma list allowed to run /commands (e.g. "neil-phone,my-google")');
       Logger.log('  CAPABILITIES — comma-delimited list (e.g. "gmail,calendar")');
+      Logger.log('  A8S_RESOLVE_UNMAPPED — "true" marks unmapped unread mail read after skipping (default: leave unread; only for a dedicated agent mailbox)');
       Logger.log('  TRIGGER_MINUTES — trigger interval: 1, 5, 10, 15, or 30 (default: 5)');
       Logger.log('  MARKDOWN_AUTO — set to "false" to disable auto Markdown detection (default: on)');
       Logger.log('Legacy: A8S_PARTICIPANT fills DEVICE + DEFAULT_AGENT when those are unset.');
@@ -1195,6 +1206,7 @@ const A8S = (() => {
     disableLogging,
     _testing: {
       ulid, parseCommand, formatEmailForAgent, formatEventForAgent, writeEnvelope, routeMessage,
+      handleGmail, pushNewEmails, selfEmailAddress,
       pad, extractDriveLinks, exportDocAsMarkdown, downloadDriveFile, hashPrefix, getConfig,
       describeAge, formatMessageTag,
       detectMarkdown, bodyForMarkdownDetection, parseMarkdownFlags, effectiveMarkdownMode,
