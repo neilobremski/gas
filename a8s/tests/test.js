@@ -12,12 +12,15 @@ const { marked } = require('marked');
 
 global.marked = marked;
 global.Logger = { log: () => {} };
+global._testProperties = {};
 global.PropertiesService = {
   getScriptProperties: () => ({
-    getProperty: () => null,
-    setProperty: () => {},
-    deleteProperty: () => {},
-    getProperties: () => ({})
+    getProperty: key => Object.prototype.hasOwnProperty.call(global._testProperties, key)
+      ? global._testProperties[key]
+      : null,
+    setProperty: (key, value) => { global._testProperties[key] = value; },
+    deleteProperty: key => { delete global._testProperties[key]; },
+    getProperties: () => Object.assign({}, global._testProperties)
   })
 };
 global.Utilities = {
@@ -122,10 +125,24 @@ function parseEmailMap(raw) {
   }
 }
 
+function parseRoutes(raw) {
+  const routes = {};
+  String(raw || '').split(';').forEach(entry => {
+    const equals = entry.indexOf('=');
+    if (equals < 1) return;
+    const name = entry.slice(0, equals).trim();
+    if (!/^[A-Za-z0-9_.:-]+$/.test(name)) return;
+    const recipients = entry.slice(equals + 1).split(',')
+      .map(normalizeEmailAddress)
+      .filter((addr, index, all) => addr.indexOf('@') > 0 && all.indexOf(addr) === index);
+    if (recipients.length) routes[name] = recipients;
+  });
+  return routes;
+}
+
 function parseCommandAgents(raw, device) {
-  const list = (raw || '').split(',').map(s => s.trim()).filter(Boolean);
-  if (list.length) return list;
-  return device ? [device] : [];
+  if (raw === null || typeof raw === 'undefined') return device ? [device] : [];
+  return String(raw).split(',').map(s => s.trim()).filter(Boolean);
 }
 
 function stripReplyPrefixes(subject) {
@@ -190,6 +207,15 @@ function isEmailPrincipal(name, config) {
   return !!addressForEmailAgent(name, config);
 }
 
+function routeRecipients(name, config) {
+  const routes = config.routes || {};
+  return routes[(name || '').trim()] || [];
+}
+
+function isNamedRoute(name, config) {
+  return routeRecipients(name, config).length > 0;
+}
+
 function isDeviceTarget(to, config) {
   const t = (to || '').trim();
   if (!t) return true;
@@ -200,6 +226,7 @@ function decideInboxRoute(envelope, config) {
   const to = (envelope && envelope.to) || '';
   if (isEmailPrincipal(to, config)) return 'email';
   if (isDeviceTarget(to, config)) return 'device';
+  if (isNamedRoute(to, config)) return 'route';
   return 'drop';
 }
 
@@ -573,6 +600,26 @@ function createMockOutbox() {
   };
 }
 
+function createMockDriveRoot(name, id) {
+  const folders = {};
+  return {
+    getName: () => name,
+    getId: () => id,
+    getFoldersByName: folderName => {
+      const folder = folders[folderName];
+      return { hasNext: () => !!folder, next: () => folder };
+    },
+    createFolder: folderName => {
+      const folder = createMockOutbox();
+      folder.getId = () => `${id}-${folderName}`;
+      folder.getName = () => folderName;
+      folders[folderName] = folder;
+      return folder;
+    },
+    _folders: folders
+  };
+}
+
 function createMockFilesFolder() {
   const created = [];
   const subfolders = {};
@@ -753,8 +800,15 @@ function handleCalendar(command, args) {
   const map = parseEmailMap('{"Human@Example.com":"neil-email"}');
   assertEqual(map['human@example.com'], 'neil-email', 'parseEmailMap: normalizes keys');
   assertDeepEqual(parseEmailMap('not-json'), {}, 'parseEmailMap: invalid JSON');
+  assertDeepEqual(
+    parseRoutes('owner-mail=Owner@Example.com; team=a@example.com,b@example.com,a@example.com'),
+    { 'owner-mail': ['owner@example.com'], team: ['a@example.com', 'b@example.com'] },
+    'parseRoutes: parses names, normalizes addresses, and deduplicates recipients'
+  );
+  assertDeepEqual(parseRoutes('bad name=x@example.com;empty=;also-bad=not-an-email'), {}, 'parseRoutes: drops invalid entries');
   assertDeepEqual(parseCommandAgents('neil-phone, neil-email', 'neil-email'), ['neil-phone', 'neil-email'], 'parseCommandAgents: list');
-  assertDeepEqual(parseCommandAgents('', 'neil-email'), ['neil-email'], 'parseCommandAgents: fallback device');
+  assertDeepEqual(parseCommandAgents(null, 'neil-email'), ['neil-email'], 'parseCommandAgents: unset falls back to device');
+  assertDeepEqual(parseCommandAgents('', 'neil-email'), [], 'parseCommandAgents: explicit empty removes command surface');
 })();
 
 (() => {
@@ -795,10 +849,12 @@ function handleCalendar(command, args) {
 (() => {
   const config = {
     device: 'my-google',
-    emailMap: { 'human@example.com': 'neil-email' }
+    emailMap: { 'human@example.com': 'neil-email' },
+    routes: { team: ['a@example.com', 'b@example.com'] }
   };
   assertEqual(decideInboxRoute({ to: 'neil-email' }, config), 'email', 'decideInboxRoute: email principal');
   assertEqual(decideInboxRoute({ to: 'my-google' }, config), 'device', 'decideInboxRoute: device');
+  assertEqual(decideInboxRoute({ to: 'team' }, config), 'route', 'decideInboxRoute: named route');
   assertEqual(decideInboxRoute({ to: '' }, config), 'device', 'decideInboxRoute: empty to = device');
   assertEqual(decideInboxRoute({ to: 'unknown-agent' }, config), 'drop', 'decideInboxRoute: unknown');
 })();
@@ -928,34 +984,59 @@ function handleCalendar(command, args) {
   global._testEffectiveEmail = '';
 })();
 
-// --- real /check, /search, /read: self and age tags through production code ---
+// --- real /check, /search, /read: mapped-only switchboard visibility ---
 
 (() => {
   global._testActiveEmail = '';
   global._testEffectiveEmail = 'agent@example.com';
   const now = new Date();
   const twoDaysAgo = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 2, 12, 0, 0);
+  const mappedOld = createMockMessage({
+    from: 'human@example.com', subject: 'Mapped conversation', date: twoDaysAgo, body: 'hello', unread: false
+  });
   const own = createMockMessage({
     from: 'agent@example.com', subject: 'Old note', date: twoDaysAgo, body: 'mine', unread: true
   });
   const other = createMockMessage({
     from: 'human@example.com', subject: 'Hi', date: now, body: 'yo', unread: true
   });
+  const mappedAlt = createMockMessage({
+    from: 'alt@example.com', subject: 'Alias conversation', date: twoDaysAgo, body: 'hello', unread: false
+  });
   const alias = createMockMessage({
     from: 'robot@example.com', subject: 'Alias note', date: twoDaysAgo, body: 'also mine', unread: true
   });
+  const unmapped = createMockMessage({
+    from: 'news@example.org', subject: 'Private promo', date: now, body: 'not for the agent', unread: true
+  });
+  const mixedMapped = createMockMessage({
+    from: 'human@example.com', subject: 'Mixed thread', date: twoDaysAgo, body: 'mapped part', unread: false
+  });
+  const mixedUnmapped = createMockMessage({
+    from: 'outsider@example.org', subject: 'Mixed private part', date: now, body: 'secret', unread: false
+  });
   global.GmailApp = createMockGmailApp({
-    threads: [createMockThread('t1', [own]), createMockThread('t2', [other]), createMockThread('t3', [alias])],
-    unreadCount: 3,
+    threads: [
+      createMockThread('t1', [mappedOld, own]),
+      createMockThread('t2', [other]),
+      createMockThread('t3', [mappedAlt, alias]),
+      createMockThread('t4', [unmapped]),
+      createMockThread('t5', [mixedMapped, mixedUnmapped])
+    ],
     aliases: ['robot@example.com']
   });
-  const config = { capabilities: ['gmail'], markdownAuto: false };
+  const config = {
+    capabilities: ['gmail'],
+    markdownAuto: false,
+    emailMap: { 'human@example.com': 'human-mail', 'alt@example.com': 'alt-mail' }
+  };
   const outbox = createMockOutbox();
   const filesFolder = createMockFilesFolder();
 
   const check = realA8S.handleGmail('/check', [], '', {}, filesFolder, outbox, config, {});
-  assert(check.includes('[your own sent mail, 2 days ago]'), 'real /check: own sent mail tagged with age');
+  assert(check.startsWith('1 unread\n'), 'real /check: counts only mapped unread threads');
   assert(check.includes('| [today]'), 'real /check: other sender tagged with age only');
+  assert(!check.includes('Private promo'), 'real /check: unmapped subject is invisible');
 
   const read = realA8S.handleGmail('/read', ['t1'], '', {}, filesFolder, outbox, config, {});
   assert(read.includes('[your own sent mail, 2 days ago] ---'), 'real /read: message header marks own mail');
@@ -965,6 +1046,13 @@ function handleCalendar(command, args) {
 
   const search = realA8S.handleGmail('/search', ['note'], '', {}, filesFolder, outbox, config, {});
   assert(search.includes('[your own sent mail, 2 days ago]'), 'real /search: own sent mail tagged');
+  assert(!search.includes('Private promo'), 'real /search: unmapped-only thread is invisible');
+  assert(!search.includes('Mixed private part'), 'real /search: mixed external-sender thread is invisible');
+
+  const unmappedRead = realA8S.handleGmail('/read', ['t4'], '', {}, filesFolder, outbox, config, {});
+  assertEqual(unmappedRead, 'refused: thread is outside the mapped switchboard', 'real /read: unmapped thread refused');
+  const mixedRead = realA8S.handleGmail('/read', ['t5'], '', {}, filesFolder, outbox, config, {});
+  assertEqual(mixedRead, 'refused: thread is outside the mapped switchboard', 'real /read: mixed external-sender thread refused');
 
   global._testEffectiveEmail = '';
   global.GmailApp = null;
@@ -1040,6 +1128,89 @@ function handleCalendar(command, args) {
   assert(!result.includes('x'.repeat(5000)), 'formatEmail: body is actually shorter');
 })();
 
+// --- pushUnmappedDigest(): opt-in, informational, daily, non-destructive ---
+
+(() => {
+  const now = new Date('2026-08-24T18:00:00Z');
+  const previous = '2026-08-22T18:00:00.000Z';
+  global._testProperties = { _a8s_unmapped_digest_at: previous };
+  global._testEffectiveEmail = 'agent@example.com';
+  const unmapped = createMockMessage({
+    from: 'News <news@example.org>', subject: 'Daily brief', date: '2026-08-23T18:30:00Z', body: 'info', unread: true
+  });
+  const mapped = createMockMessage({
+    from: 'human@example.com', subject: 'Mapped note', date: '2026-08-23T19:00:00Z', body: 'work', unread: true
+  });
+  const own = createMockMessage({
+    from: 'agent@example.com', subject: 'Sent copy', date: '2026-08-23T20:00:00Z', body: 'mine'
+  });
+  global.GmailApp = createMockGmailApp({
+    threads: [createMockThread('d1', [unmapped]), createMockThread('d2', [mapped]), createMockThread('d3', [own])]
+  });
+  const config = {
+    unmappedDigest: true,
+    defaultAgent: 'agent',
+    capabilities: ['gmail'],
+    emailMap: { 'human@example.com': 'human-mail' }
+  };
+  const outbox = createMockOutbox();
+  assertEqual(realA8S.pushUnmappedDigest(config, outbox, now), 1, 'digest: pushes one summary');
+  assertEqual(outbox.getFiles().length, 1, 'digest: exactly one envelope written');
+  const digest = JSON.parse(outbox.getFiles()[0].content);
+  assertEqual(digest.to, 'agent', 'digest: sent to default agent');
+  assert(digest.content.includes('Informational only'), 'digest: explicitly informational');
+  assert(digest.content.includes('news@example.org') && digest.content.includes('Daily brief'), 'digest: summarizes unmapped sender and subject');
+  assert(!digest.content.includes('Mapped note') && !digest.content.includes('Sent copy'), 'digest: excludes mapped and own mail');
+  assert(unmapped.isUnread(), 'digest: leaves unmapped mail unread');
+  assertEqual(global._testProperties._a8s_unmapped_digest_at, now.toISOString(), 'digest: checkpoints after successful write');
+
+  assertEqual(
+    realA8S.pushUnmappedDigest(config, outbox, new Date('2026-08-24T19:00:00Z')),
+    0,
+    'digest: does not re-serve inside the daily interval'
+  );
+  assertEqual(outbox.getFiles().length, 1, 'digest: second check writes no envelope');
+
+  global._testEffectiveEmail = '';
+  global.GmailApp = null;
+  global._testProperties = {};
+})();
+
+(() => {
+  const previous = '2026-08-20T00:00:00.000Z';
+  global._testProperties = { _a8s_unmapped_digest_at: previous };
+  global.GmailApp = createMockGmailApp({
+    threads: [createMockThread('d1', [createMockMessage({
+      from: 'news@example.org', subject: 'Brief', date: '2026-08-23T00:00:00Z', body: 'info'
+    })])]
+  });
+  const config = { unmappedDigest: true, defaultAgent: 'agent', capabilities: ['gmail'], emailMap: {} };
+  let threw = false;
+  try {
+    realA8S.pushUnmappedDigest(config, { createFile: () => { throw new Error('Drive unavailable'); } }, new Date('2026-08-24T00:00:00Z'));
+  } catch (e) {
+    threw = true;
+  }
+  assert(threw, 'digest: surfaces outbox failure for trigger logging');
+  assertEqual(global._testProperties._a8s_unmapped_digest_at, previous, 'digest: failed write does not advance checkpoint');
+  global.GmailApp = null;
+  global._testProperties = {};
+})();
+
+(() => {
+  const previous = '2026-08-20T00:00:00.000Z';
+  const now = new Date('2026-08-24T00:00:00Z');
+  global._testProperties = { _a8s_unmapped_digest_at: previous };
+  global.GmailApp = createMockGmailApp({ threads: [] });
+  const base = { defaultAgent: 'agent', capabilities: ['gmail'], emailMap: {} };
+  assertEqual(realA8S.pushUnmappedDigest(Object.assign({ unmappedDigest: false }, base), createMockOutbox(), now), 0, 'digest: off by default');
+  assertEqual(global._testProperties._a8s_unmapped_digest_at, previous, 'digest: disabled mode does not touch checkpoint');
+  assertEqual(realA8S.pushUnmappedDigest(Object.assign({ unmappedDigest: true }, base), createMockOutbox(), now), 0, 'digest: no activity writes no envelope');
+  assertEqual(global._testProperties._a8s_unmapped_digest_at, now.toISOString(), 'digest: empty daily scan advances checkpoint');
+  global.GmailApp = null;
+  global._testProperties = {};
+})();
+
 // --- writeEnvelope() ---
 
 (() => {
@@ -1075,6 +1246,64 @@ function handleCalendar(command, args) {
   const outbox = createMockOutbox();
   writeEnvelope(outbox, 'my-agent', 'test', []);
   assert(!outbox.getFiles()[0].content.includes('"files"'), 'writeEnvelope: empty files array omitted');
+})();
+
+// --- processInboxEnvelope(): named routes are address nodes, not commands ---
+
+(() => {
+  let sent = null;
+  global.GmailApp = createMockGmailApp({ onSendEmail: mail => { sent = mail; } });
+  const config = {
+    device: 'my-google',
+    capabilities: ['gmail'],
+    emailMap: {},
+    routes: { team: ['a@example.com', 'b@example.com'] },
+    commandAgents: []
+  };
+  const filesFolder = createMockFilesFolder();
+  filesFolder.createFile('brief.txt', 'attachment bytes', 'text/plain');
+  const outbox = createMockOutbox();
+  realA8S.processInboxEnvelope({
+    id: 'route-message',
+    from: 'agent',
+    to: 'team',
+    content: 'Status update\nFirst line of body\nSecond line',
+    files: [{ filename: 'brief.txt' }]
+  }, config, filesFolder, outbox);
+
+  assert(sent, 'named route: sends email without command authorization');
+  assertEqual(sent.to, 'a@example.com,b@example.com', 'named route: sends to every mapped recipient');
+  assertEqual(sent.subject, 'Status update', 'named route: first content line is subject');
+  assertEqual(sent.body, 'First line of body\nSecond line', 'named route: remaining content is body');
+  assertEqual(sent.opts.attachments.length, 1, 'named route: carries attachments through existing path');
+  assertEqual(outbox.getFiles().length, 0, 'named route: success is silent');
+
+  realA8S.processInboxEnvelope({ from: 'agent', to: 'my-google', content: '/check' }, config, filesFolder, outbox);
+  assertEqual(outbox.getFiles().length, 0, 'named route sender: command remains rejected and unanswered');
+  global.GmailApp = null;
+})();
+
+(() => {
+  global.GmailApp = createMockGmailApp({ onSendEmail: () => { throw new Error('mail quota'); } });
+  const config = {
+    device: 'my-google',
+    capabilities: ['gmail'],
+    emailMap: {},
+    routes: { owner: ['owner@example.com'] },
+    commandAgents: []
+  };
+  const outbox = createMockOutbox();
+  realA8S.processInboxEnvelope(
+    { from: 'agent', to: 'owner', content: 'Hello\nBody' },
+    config,
+    createMockFilesFolder(),
+    outbox
+  );
+  assertEqual(outbox.getFiles().length, 1, 'named route failure: sends one error response');
+  const response = JSON.parse(outbox.getFiles()[0].content);
+  assertEqual(response.to, 'agent', 'named route failure: responds to sender');
+  assert(response.content.includes('error: send failed: mail quota'), 'named route failure: reports delivery error');
+  global.GmailApp = null;
 })();
 
 // --- routeMessage() ---
@@ -1312,6 +1541,46 @@ function handleCalendar(command, args) {
   assertDeepEqual(files, [], 'formatEvent+drive: no drive links means no files');
 })();
 
+// --- scheduler outbox: calendar gets a distinct filesystem identity ---
+
+(() => {
+  const mainOutbox = createMockOutbox();
+  const schedulerRoot = createMockDriveRoot('scheduler-root', 'sched-folder');
+  global.DriveApp = {
+    getFolderById: id => {
+      if (id !== 'sched-folder') throw new Error('folder not found');
+      return schedulerRoot;
+    }
+  };
+  const selected = realA8S.resolveCalendarOutbox({ schedFolderId: 'sched-folder' }, mainOutbox);
+  assert(selected !== mainOutbox, 'scheduler outbox: configured folder selects distinct outbox');
+  assertEqual(selected, schedulerRoot._folders['.outbox'], 'scheduler outbox: uses .outbox under scheduler root');
+  assertEqual(realA8S.resolveCalendarOutbox({ schedFolderId: '' }, mainOutbox), mainOutbox, 'scheduler outbox: unset preserves main outbox');
+
+  const start = new Date(Date.now() + 5 * 60000);
+  const event = createMockEvent({
+    id: 'scheduler-event',
+    title: 'Timed instruction',
+    start,
+    end: new Date(start.getTime() + 30 * 60000),
+    description: 'Run the scheduled task'
+  });
+  global.CalendarApp = { getDefaultCalendar: () => ({ getEvents: () => [event] }) };
+  global._testProperties = {};
+  const count = realA8S.pushUpcomingEvents(
+    { defaultAgent: 'agent', capabilities: ['calendar'] },
+    selected,
+    null
+  );
+  assertEqual(count, 1, 'scheduler outbox: calendar event pushed');
+  assertEqual(selected.getFiles().length, 1, 'scheduler outbox: calendar envelope written to scheduler');
+  assertEqual(mainOutbox.getFiles().length, 0, 'scheduler outbox: main outbox receives no calendar envelope');
+
+  delete global.CalendarApp;
+  delete global.DriveApp;
+  global._testProperties = {};
+})();
+
 // --- Trigger interval config ---
 
 (() => {
@@ -1337,6 +1606,26 @@ function handleCalendar(command, args) {
   assertEqual(parseInterval(null), 5, 'triggerConfig: null defaults to 5');
   assertEqual(parseInterval('3'), 5, 'triggerConfig: invalid falls back to 5');
   assertEqual(parseInterval('abc'), 5, 'triggerConfig: NaN falls back to 5');
+})();
+
+(() => {
+  global._testProperties = {
+    A8S_ROOT_FOLDER_ID: 'root',
+    A8S_SCHED_FOLDER_ID: 'scheduler',
+    A8S_DEVICE: 'my-google',
+    A8S_DEFAULT_AGENT: 'agent',
+    A8S_EMAIL_MAP: '{"Human@Example.com":"human-mail"}',
+    A8S_ROUTES: 'owner-mail=owner@example.com;team=a@example.com,b@example.com',
+    A8S_COMMAND_AGENTS: '',
+    A8S_UNMAPPED_DIGEST: 'true',
+    CAPABILITIES: 'gmail,calendar'
+  };
+  const config = realA8S.getConfig();
+  assertEqual(config.schedFolderId, 'scheduler', 'getConfig: scheduler folder property');
+  assertDeepEqual(config.routes.team, ['a@example.com', 'b@example.com'], 'getConfig: named routes parsed');
+  assertDeepEqual(config.commandAgents, [], 'getConfig: explicit empty command-agent property is preserved');
+  assert(config.unmappedDigest, 'getConfig: unmapped digest opt-in');
+  global._testProperties = {};
 })();
 
 // --- detectMarkdown() ---

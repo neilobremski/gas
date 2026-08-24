@@ -1,6 +1,6 @@
 # A8S-GAS — Google Apps Script participant for A8S
 
-A GAS script that acts as an [A8S](https://github.com/witw-llc/ar3) participant via Google Drive ([filedrop](https://github.com/witw-llc/ar3/blob/main/docs/a8s-filedrop.md) transport). Polls for commands, routes inbound email/calendar like an SMS bridge, and can send new outbound email when agents message an email principal.
+A GAS script that acts as an [A8S](https://github.com/witw-llc/ar3) participant via Google Drive ([filedrop](https://github.com/witw-llc/ar3/blob/main/docs/a8s-filedrop.md) transport). It provides a mapped-mail switchboard, named outbound email routes, an optional command surface, and calendar scheduling with a distinct sender identity.
 
 Upstream A8S docs: [docs/a8s.md](https://github.com/witw-llc/ar3/blob/main/docs/a8s.md) · [filedrop](https://github.com/witw-llc/ar3/blob/main/docs/a8s-filedrop.md)
 
@@ -19,21 +19,26 @@ Drive folder layout:
     <msg_id>/          ← outbound attachment bundles (GAS → recipient)
   .files/
     <msg_id>/          ← inbound attachments (A8S → GAS, e.g. tell --attach)
+
+<scheduler-root>/      ← optional; set A8S_SCHED_FOLDER_ID
+  .outbox/             ← calendar envelopes only
 ```
 
-Register the **same** Drive mount under multiple filedrop names — a command node plus each email principal. Mail to either name lands in the shared `.inbox/`; GAS routes on `envelope.to`:
+Register the **same primary Drive mount** under multiple filedrop names — the command node, email principals, and named routes. Mail to any of these names lands in the shared `.inbox/`; GAS routes on `envelope.to`:
 
 ```bash
 a8s add my-google /mnt/gdrive/a8s filedrop
-a8s add neil-email /mnt/gdrive/a8s filedrop
+a8s add human-mail /mnt/gdrive/a8s filedrop
+a8s add owner-mail /mnt/gdrive/a8s filedrop
 ```
 
 | `to` | GAS behavior |
 |------|----------------|
 | `my-google` (`A8S_DEVICE`) | Slash commands (if `from` is in `A8S_COMMAND_AGENTS`) |
-| `neil-email` (value in `A8S_EMAIL_MAP`) | Opaque outbound email to the mapped address |
+| `human-mail` (value in `A8S_EMAIL_MAP`) | Opaque outbound email to the mapped address |
+| `owner-mail` (key in `A8S_ROUTES`) | Email whose subject is the first content line and body is the remainder |
 
-Email-ingress outbox envelopes set `"from": "neil-email"` so replies can target the email principal.
+Email-ingress outbox envelopes set `"from": "human-mail"` so replies can target the email principal.
 
 ## Project files
 
@@ -88,37 +93,43 @@ clasp open                 # open in browser
 | Property | Value |
 |----------|-------|
 | `A8S_ROOT_FOLDER_ID` | Drive folder ID (from the URL) |
+| `A8S_SCHED_FOLDER_ID` | Optional second Drive folder; calendar pushes go to its `.outbox` |
 | `A8S_DEVICE` | Filedrop command-node name (e.g. `my-google`) |
 | `A8S_DEFAULT_AGENT` | Sticky push destination when subject has no `@agent` |
-| `A8S_EMAIL_MAP` | JSON map `{"human@example.com":"neil-email"}` (address → email principal) |
-| `A8S_COMMAND_AGENTS` | Comma list allowed to run `/commands` on the device (e.g. `neil-phone,my-google`) |
+| `A8S_EMAIL_MAP` | JSON map `{"human@example.com":"human-mail"}` (address → email principal) |
+| `A8S_ROUTES` | Named recipients: `owner-mail=owner@example.com;team=a@example.com,b@example.com` |
+| `A8S_COMMAND_AGENTS` | Comma list allowed to run `/commands`; set explicitly empty for no command surface |
 | `CAPABILITIES` | Comma-delimited: `gmail,calendar` |
 | `TRIGGER_MINUTES` | Polling interval: 1, 5, 10, 15, or 30 (default: 5) |
 | `MARKDOWN_AUTO` | Set to `false` to disable auto Markdown detection (default: **on**) |
 | `A8S_RESOLVE_UNMAPPED` | Set to `true` to mark unmapped unread mail read after skipping it (default: **off** — leave unread). Only for a mailbox dedicated to the agent. |
+| `A8S_UNMAPPED_DIGEST` | Set to `true` for one daily informational summary of unmapped sender/subject metadata (default: **off**) |
 
-Legacy: if `A8S_DEVICE` / `A8S_DEFAULT_AGENT` are unset, `A8S_PARTICIPANT` fills both. If `A8S_COMMAND_AGENTS` is unset, only `A8S_DEVICE` may run commands.
+Legacy: if `A8S_DEVICE` / `A8S_DEFAULT_AGENT` are unset, `A8S_PARTICIPANT` fills both. If `A8S_COMMAND_AGENTS` is **unset**, only `A8S_DEVICE` may run commands; an explicitly empty property allows nobody.
 
 5. Run `setup()` from the editor to verify config
 6. Run `testConnection()` to confirm Drive access (will prompt for permissions)
 7. Run `enableLogging()` to enable transaction logging (optional; same sheets as GAS Bridge)
 8. Run `installTrigger()` to start polling
 
-On the server side, register the shared Drive mount once per name (command node + email principals):
+On the server side, register the shared primary Drive mount once per name:
 
 ```bash
 a8s add my-google /mnt/gdrive/a8s filedrop
-a8s add neil-email /mnt/gdrive/a8s filedrop
-a8s start my-google   # or start an alias that covers both
+a8s add human-mail /mnt/gdrive/a8s filedrop
+a8s add owner-mail /mnt/gdrive/a8s filedrop
+a8s start my-google   # or start an alias that covers all registered names
 ```
 
 Example properties:
 
 ```
 A8S_DEVICE=my-google
-A8S_DEFAULT_AGENT=bob
-A8S_EMAIL_MAP={"human@example.com":"neil-email"}
-A8S_COMMAND_AGENTS=neil-phone,my-google
+A8S_DEFAULT_AGENT=agent
+A8S_EMAIL_MAP={"human@example.com":"human-mail"}
+A8S_ROUTES=owner-mail=owner@example.com;team=a@example.com,b@example.com
+A8S_COMMAND_AGENTS=
+A8S_UNMAPPED_DIGEST=false
 ```
 
 ## Routing
@@ -127,11 +138,13 @@ A8S_COMMAND_AGENTS=neil-phone,my-google
 |------|----------|
 | Unread email from mapped address, subject has `@agent` | Outbox `to: agent`, `from: <email-principal>` |
 | Unread email from mapped address, no `@` | Outbox `to: A8S_DEFAULT_AGENT`, `from: <email-principal>` |
-| Unread email from unmapped address | Left unread (not pushed); `A8S_RESOLVE_UNMAPPED=true` marks it read |
-| Calendar event (optional `@agent` in title) | Outbox to `@agent` or sticky default |
+| Unread email from unmapped address | Invisible to commands and left unread; `A8S_RESOLVE_UNMAPPED=true` marks it read |
+| Daily unmapped digest enabled | One informational sender/subject summary to `A8S_DEFAULT_AGENT`; mail stays unread and is not re-served |
+| Calendar event (optional `@agent` in title) | Scheduler `.outbox` when configured; otherwise primary `.outbox` |
 | Inbox `to: A8S_DEVICE` + `/command` from `A8S_COMMAND_AGENTS` | Execute; reply to `envelope.from` |
 | Inbox `to: A8S_DEVICE` + `/command` from others | Rejected (unauthorized) |
 | Inbox `to: <email-principal>` | Opaque new email to mapped address; subject `@<sender>` |
+| Inbox `to: <named-route>` | Email configured recipient(s); first content line is subject, remainder is body; success is silent |
 | Inbox `to:` unknown | Dropped |
 
 Subject parse strips leading `Re:` / `Fwd:` / `Fw:` (repeated), then takes the first `@agent` token. Example: `RE: @bob the thing` → `to: bob`, content subject rest + body.
@@ -139,7 +152,7 @@ Subject parse strips leading `Re:` / `Fwd:` / `Fw:` (repeated), then takes the f
 ### Email push (mapped senders)
 
 Every trigger cycle, checks **unread** emails:
-1. Normalize `From:` and require an `A8S_EMAIL_MAP` hit (value = email principal name, e.g. `neil-email`)
+1. Normalize `From:` and require an `A8S_EMAIL_MAP` hit (value = email principal name, e.g. `human-mail`)
 2. Resolve destination via `@agent` or sticky default
 3. Stage attachments under `.outbox/<msg_id>/`
 4. Write SMS-like content — a `From:` / `Date:` header (with relative age), optional subject remainder, body truncated at 4KB — with `from` = email principal
@@ -147,9 +160,23 @@ Every trigger cycle, checks **unread** emails:
 
 **Re-push:** Mark an email as UNREAD in Gmail → next trigger picks it up again (still must be mapped).
 
+### Switchboard posture
+
+A mapped-only bridge is a **switchboard**: the mailbox is not the agent's to browse. `/check` counts and lists only mapped unread correspondence, `/search` returns only mapped conversations, and `/read` refuses unmapped-only or mixed-external-sender threads. Unmapped unread status is never exposed through commands, regardless of `A8S_RESOLVE_UNMAPPED`.
+
+`A8S_UNMAPPED_DIGEST=true` is an explicit exception for operators who want awareness without creating a task queue. Once per 24 hours, the bridge pushes one message beginning “Informational only — no action is required” with unmapped sender/subject metadata since the previous successful digest. It does not mark mail read, `/check` never counts it, and the checkpoint prevents it from being served again. The first enabled run looks back 24 hours.
+
 ### Outbound email (agent → human)
 
-When an agent `tell`s an **email principal** (e.g. `tell neil-email "status?"`), GAS sends a **new** email (no thread reply in v1) to that principal’s mapped address. Subject is `@<sender>` so a human reply `Re: @bob …` routes back to that agent. Slash text on this path is not executed — it is mailed as the body.
+When an agent `tell`s an **email principal** (e.g. `tell human-mail "status?"`), GAS sends a **new** email (no thread reply in v1) to that principal’s mapped address. Subject is `@<sender>` so a human reply `Re: @agent …` routes back to that agent. Slash text on this path is not executed — it is mailed as the body.
+
+A named route hides the transport and recipients from the agent:
+
+```bash
+tell owner-mail $'Status update\nEverything is on track.'
+```
+
+With `A8S_ROUTES=owner-mail=owner@example.com`, this sends subject `Status update` and body `Everything is on track.` Attachments use the same `files` path as `/send`. Routes do not consult `A8S_COMMAND_AGENTS`; success is silent, while delivery failure sends one error back to the originating agent. A deployment that only needs named routes can leave `A8S_COMMAND_AGENTS` explicitly empty so agents hold no slash-command rights. Keep route names distinct from `A8S_DEVICE` and email-principal names; those existing identities take precedence if names collide.
 
 Device commands use the command node: `tell my-google "/check"`.
 
@@ -171,6 +198,14 @@ Check email, review messages, plan today's priorities
 ```
 
 Destination: `@agent` in the title if present, else `A8S_DEFAULT_AGENT`.
+
+When `A8S_SCHED_FOLDER_ID` is set, calendar envelopes and their attachment bundles are written beneath that folder's `.outbox`. Register its separately mounted folder as another filedrop node:
+
+```bash
+a8s add scheduler /mnt/gdrive/a8s-scheduler filedrop
+```
+
+Calendar instructions then arrive from `scheduler`, while mail still arrives from the bridge node on the primary folder. **One node, one face:** receivers key trust and pacing off the sender name, so a node should be a mail switchboard or a scheduler, not both. Leaving `A8S_SCHED_FOLDER_ID` unset preserves single-outbox behavior.
 
 ### Calendar as a scheduling mechanism
 
@@ -194,15 +229,15 @@ Events are deduped by `eventId@startTime`. Rescheduling an event re-triggers the
 
 ## Commands
 
-Authorized senders are listed in `A8S_COMMAND_AGENTS` (e.g. `neil-phone` for diagnostics).
+Authorized senders are listed in `A8S_COMMAND_AGENTS` (e.g. `diagnostic-agent`).
 
 ### Gmail (requires `gmail` in CAPABILITIES)
 
 | Command | Description |
 |---------|-------------|
-| `/check` | Unread count + last 5 subjects with thread IDs, each tagged with age (and `your own sent mail` when it is) |
-| `/search <query>` | Gmail search, returns thread IDs + subjects, tagged like `/check` |
-| `/read <thread_id>` | Full thread text; each message header carries age and marks the account's own sent mail |
+| `/check` | Mapped unread-thread count + newest 5 mapped subjects with thread IDs and age |
+| `/search <query>` | Gmail search restricted to mapped conversations; returns thread IDs + subjects |
+| `/read <thread_id>` | Full mapped conversation; refuses unmapped-only or mixed-external-sender threads |
 | `/send <to> <subject>` | Send new email (body = lines after command; attachments via `files: [{filename}]` in inbox envelope) |
 | `/reply <thread_id>` | Reply to existing thread (body = lines after command; attachments from `.files/<msg_id>/`) |
 
@@ -293,6 +328,7 @@ Run from the Apps Script editor:
 
 | Function | Purpose |
 |----------|---------|
+| `a8sHelp()` | List Script Properties and the two-node scheduler pattern |
 | `setup()` | Verify configuration |
 | `testConnection()` | Confirm Drive folder access + permissions |
 | `enableLogging()` / `disableLogging()` | Transaction log to `GAS Log YYYY-MM-DD` |
@@ -309,5 +345,5 @@ Run from the Apps Script editor:
 - Calendar Advanced Service required for event attachments
 - File transfer: outbound bundles under `.outbox/<msg_id>/`; inbound from A8S under `.files/<msg_id>/`
 - `ScriptApp.getOAuthToken()` used for Drive API export (Google Docs → markdown)
-- Register each email principal as a separate filedrop name on the same Drive mount as `A8S_DEVICE`
+- Register each email principal and named route as a separate filedrop name on the same Drive mount as `A8S_DEVICE`
 - v1: outbound human mail is always a new message (no Gmail thread reply routing)
