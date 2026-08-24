@@ -24,7 +24,7 @@ a8s/
   appsscript.json         # manifest (V8, Calendar advanced service)
   package.json            # npm dep: marked; devDep: esbuild
   scripts/vendor-marked.mjs
-  tests/test.js           # 169 unit tests (Node.js)
+  tests/test.js           # unit tests (Node.js)
   deploy.sh               # npm ci → vendor → tests → clasp push
   .claspignore            # excludes node_modules, tests, scripts, etc.
 ```
@@ -38,7 +38,7 @@ a8s/
 ```bash
 cd a8s
 npm ci && npm run vendor   # transpile marked → vendor/marked.js
-tests/run                  # 169 tests
+tests/run                  # unit test suite
 ./deploy.sh                # npm ci, vendor, tests, clasp push
 clasp push                 # push without testing
 ```
@@ -52,10 +52,14 @@ clasp push                 # push without testing
 | Property | Default | Purpose |
 |----------|---------|---------|
 | `A8S_ROOT_FOLDER_ID` | — | Drive folder for `.inbox`/`.outbox`/`.files` |
+| `A8S_SCHED_FOLDER_ID` | — | Optional second Drive folder for calendar `.outbox` |
 | `A8S_DEVICE` | — | Filedrop command-node name (shared Drive mount) |
 | `A8S_DEFAULT_AGENT` | — | Sticky push destination (no `@agent` in subject) |
-| `A8S_EMAIL_MAP` | — | JSON `{"human@example.com":"neil-email"}` address → email principal |
-| `A8S_COMMAND_AGENTS` | device | Comma list allowed to run `/commands` on the device |
+| `A8S_EMAIL_MAP` | — | JSON `{"human@example.com":"human-mail"}` address → email principal |
+| `A8S_ROUTES` | — | Named email recipients: `route=a@example.com,b@example.com` |
+| `A8S_COMMAND_AGENTS` | device when unset | Comma list allowed to run `/commands`; explicit empty means none |
+| `A8S_RESOLVE_UNMAPPED` | off | Mark skipped unmapped unread mail read |
+| `A8S_UNMAPPED_DIGEST` | off | Daily informational unmapped sender/subject digest |
 | `A8S_PARTICIPANT` | — | Legacy: fills `DEVICE` + `DEFAULT_AGENT` if unset |
 | `CAPABILITIES` | — | `gmail`, `calendar` (comma-delimited) |
 | `TRIGGER_MINUTES` | `5` | Poll interval: 1, 5, 10, 15, or 30 |
@@ -66,7 +70,7 @@ clasp push                 # push without testing
 
 - Edit `a8s/Code.js`, bump `VERSION` constant and header comment (`A8S vX.Y`).
 - Deploy via `a8s/deploy.sh` (clasp push + Apps Script version).
-- Tests: `a8s/tests/run` (169 tests).
+- Tests: `a8s/tests/run`.
 
 ### GAS Bridge (`bridge/`)
 
@@ -125,7 +129,7 @@ Mirrors GAS Bridge `_logRequest` pattern:
 
 | Component | How to test |
 |-----------|-------------|
-| A8S | `a8s/tests/run` — 169 tests, mocked Gmail/Drive/Calendar + `marked` from npm |
+| A8S | `a8s/tests/run` — mocked Gmail/Drive/Calendar + `marked` from npm |
 | Bridge | Manual curl / `gas` CLI against deployed instance |
 
 Add tests in `a8s/tests/test.js` using `assert` / `assertEqual`. Run before every push.

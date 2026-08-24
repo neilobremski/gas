@@ -34,6 +34,9 @@ Features:
 
 - Gmail commands: `/check`, `/search`, `/read`, `/send`, `/reply`
 - Calendar commands: `/today`, `/week`, `/create`
+- **Switchboard visibility** — Gmail browsing is restricted to mapped correspondents
+- **Named email routes** — agents address stable names without learning recipients or needing command rights
+- **Scheduler identity** — calendar pushes can leave through a dedicated filedrop node
 - **Markdown email** — auto-detects Markdown in `/send` and `/reply` bodies; sends multipart plain + sanitized HTML
 - **Transaction logging** — same `GAS Log YYYY-MM-DD` sheets as GAS Bridge (run `enableLogging()` in either project)
 
@@ -70,7 +73,7 @@ Bridge logs HTTP actions (`gmail.send`, etc.). A8S logs commands (`a8s.send`, `a
 
 | Component | Tests | Deploy |
 |-----------|-------|--------|
-| A8S | `a8s/tests/run` (169 tests) | `a8s/deploy.sh` |
+| A8S | `a8s/tests/run` | `a8s/deploy.sh` |
 | Bridge | Manual / `gas` CLI | Apps Script editor |
 | Standalone modules | — | Copy-paste |
 
@@ -82,7 +85,7 @@ GitHub Actions runs on pull requests:
 
 - **pii-check** — scans the PR diff for patterns in the `PII_PATTERNS` secret
 - **version-check** — requires version bumps in `bridge/Code.js` / `a8s/Code.js` when deployable files change
-- **a8s** — `npm ci`, vendor marked, 169 Node tests, PII and version unit tests
+- **a8s** — `npm ci`, vendor marked, Node test suite, PII and version unit tests
 
 Local setup:
 

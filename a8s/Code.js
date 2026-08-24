@@ -1,12 +1,12 @@
 /*
- * A8S v1.2 — Agent-to-agent messaging via Google Drive
+ * A8S v1.3 — Agent-to-agent messaging via Google Drive
  *
  * Polls .inbox/ for commands, routes email/calendar like an SMS bridge,
  * writes .outbox/ envelopes.
  */
 const A8S = (() => {
 
-  const VERSION = '1.2';
+  const VERSION = '1.3';
 
   const CROCKFORD = '0123456789ABCDEFGHJKMNPQRSTVWXYZ';
 
@@ -83,10 +83,24 @@ const A8S = (() => {
     }
   }
 
+  function parseRoutes(raw) {
+    const routes = {};
+    String(raw || '').split(';').forEach(entry => {
+      const equals = entry.indexOf('=');
+      if (equals < 1) return;
+      const name = entry.slice(0, equals).trim();
+      if (!/^[A-Za-z0-9_.:-]+$/.test(name)) return;
+      const recipients = entry.slice(equals + 1).split(',')
+        .map(normalizeEmailAddress)
+        .filter((addr, index, all) => addr.indexOf('@') > 0 && all.indexOf(addr) === index);
+      if (recipients.length) routes[name] = recipients;
+    });
+    return routes;
+  }
+
   function parseCommandAgents(raw, device) {
-    const list = (raw || '').split(',').map(s => s.trim()).filter(Boolean);
-    if (list.length) return list;
-    return device ? [device] : [];
+    if (raw === null || typeof raw === 'undefined') return device ? [device] : [];
+    return String(raw).split(',').map(s => s.trim()).filter(Boolean);
   }
 
   function stripReplyPrefixes(subject) {
@@ -151,17 +165,27 @@ const A8S = (() => {
     return !!addressForEmailAgent(name, config);
   }
 
+  function routeRecipients(name, config) {
+    const routes = config.routes || {};
+    return routes[(name || '').trim()] || [];
+  }
+
+  function isNamedRoute(name, config) {
+    return routeRecipients(name, config).length > 0;
+  }
+
   function isDeviceTarget(to, config) {
     const t = (to || '').trim();
     if (!t) return true;
     return t === (config.device || '');
   }
 
-  /** Inbox routing: email principal (opaque mail) vs device (slash commands). */
+  /** Inbox routing: email principal, device command surface, or named email route. */
   function decideInboxRoute(envelope, config) {
     const to = (envelope && envelope.to) || '';
     if (isEmailPrincipal(to, config)) return 'email';
     if (isDeviceTarget(to, config)) return 'device';
+    if (isNamedRoute(to, config)) return 'route';
     return 'drop';
   }
 
@@ -184,19 +208,23 @@ const A8S = (() => {
     const device = props.getProperty('A8S_DEVICE') || legacy;
     const defaultAgent = props.getProperty('A8S_DEFAULT_AGENT') || legacy;
     const emailMap = parseEmailMap(props.getProperty('A8S_EMAIL_MAP') || '');
-    const commandAgents = parseCommandAgents(props.getProperty('A8S_COMMAND_AGENTS') || '', device);
+    const routes = parseRoutes(props.getProperty('A8S_ROUTES') || '');
+    const commandAgents = parseCommandAgents(props.getProperty('A8S_COMMAND_AGENTS'), device);
     return {
       rootFolderId: props.getProperty('A8S_ROOT_FOLDER_ID'),
+      schedFolderId: props.getProperty('A8S_SCHED_FOLDER_ID') || '',
       device,
       defaultAgent,
       emailMap,
+      routes,
       commandAgents,
       // Legacy alias used by older call sites / logs
       participant: defaultAgent,
       capabilities: caps,
       triggerMinutes,
       markdownAuto: (props.getProperty('MARKDOWN_AUTO') || '').toLowerCase() !== 'false',
-      resolveUnmapped: (props.getProperty('A8S_RESOLVE_UNMAPPED') || '').toLowerCase() === 'true'
+      resolveUnmapped: (props.getProperty('A8S_RESOLVE_UNMAPPED') || '').toLowerCase() === 'true',
+      unmappedDigest: (props.getProperty('A8S_UNMAPPED_DIGEST') || '').toLowerCase() === 'true'
     };
   }
 
@@ -628,24 +656,64 @@ const A8S = (() => {
 
   // --- Gmail Handler ---
 
+  function isMappedMailMessage(msg, config) {
+    const map = config.emailMap || {};
+    return !!map[normalizeEmailAddress(msg.getFrom())];
+  }
+
+  function latestMappedUnreadMessage(thread, config) {
+    const messages = thread.getMessages();
+    for (let i = messages.length - 1; i >= 0; i--) {
+      if (messages[i].isUnread() && isMappedMailMessage(messages[i], config)) return messages[i];
+    }
+    return null;
+  }
+
+  // Reading/searching a mixed thread would disclose mail from outside the
+  // switchboard even if another participant is mapped, so fail the thread
+  // closed. The account's own messages are safe within a mapped conversation.
+  function isReadableMailThread(thread, config, selves) {
+    const messages = thread.getMessages();
+    let hasMappedInbound = false;
+    for (let i = 0; i < messages.length; i++) {
+      const addr = normalizeEmailAddress(messages[i].getFrom());
+      if (selves[addr]) continue;
+      if (!config.emailMap || !config.emailMap[addr]) return false;
+      hasMappedInbound = true;
+    }
+    return hasMappedInbound;
+  }
+
+  function mappedFromQuery(config) {
+    const addresses = Object.keys(config.emailMap || {});
+    if (!addresses.length) return '';
+    return `{${addresses.map(addr => `from:${addr}`).join(' ')}}`;
+  }
+
   function handleGmail(command, args, body, envelope, filesFolder, outbox, config, logCtx) {
     const self = selfEmailAddresses();
     const now = new Date();
 
     if (command === '/check') {
-      const threads = GmailApp.search('is:unread', 0, 5);
-      const subjects = threads.map(t => {
-        const msg = t.getMessages()[t.getMessageCount() - 1];
-        return `${t.getId()} | ${msg.getSubject()} | ${msg.getFrom()} | ${formatMessageTag(msg.getFrom(), msg.getDate(), self, now)}`;
-      });
-      const total = GmailApp.getInboxUnreadCount();
-      return `${total} unread\n${subjects.join('\n')}`;
+      const fromQuery = mappedFromQuery(config);
+      if (!fromQuery) return '0 unread\n';
+      const threads = GmailApp.search(`is:unread ${fromQuery}`);
+      const visible = threads.map(t => ({ thread: t, msg: latestMappedUnreadMessage(t, config) }))
+        .filter(item => !!item.msg);
+      const subjects = visible.slice(0, 5).map(item =>
+        `${item.thread.getId()} | ${item.msg.getSubject()} | ${item.msg.getFrom()} | ${formatMessageTag(item.msg.getFrom(), item.msg.getDate(), self, now)}`
+      );
+      return `${visible.length} unread\n${subjects.join('\n')}`;
     }
 
     if (command === '/search') {
       const query = args.join(' ');
       if (!query) return 'error: /search requires a query';
-      const results = GmailApp.search(query, 0, 10);
+      const fromQuery = mappedFromQuery(config);
+      if (!fromQuery) return `no results for: ${query}`;
+      const results = GmailApp.search(`(${query}) ${fromQuery}`).filter(t =>
+        isReadableMailThread(t, config, self)
+      ).slice(0, 10);
       if (!results.length) return `no results for: ${query}`;
       const lines = results.map(t => {
         const msg = t.getMessages()[t.getMessageCount() - 1];
@@ -659,6 +727,9 @@ const A8S = (() => {
       if (!threadId) return 'error: /read requires a thread ID';
       try {
         const thread = GmailApp.getThreadById(threadId);
+        if (!isReadableMailThread(thread, config, self)) {
+          return 'refused: thread is outside the mapped switchboard';
+        }
         const messages = thread.getMessages();
         const parts = messages.map(m =>
           `--- ${m.getFrom()} (${m.getDate().toISOString()}) ${formatMessageTag(m.getFrom(), m.getDate(), self, now)} ---\n${m.getPlainBody()}`
@@ -786,6 +857,50 @@ const A8S = (() => {
     return count;
   }
 
+  function pushUnmappedDigest(config, outbox, now) {
+    if (!config.unmappedDigest || !config.defaultAgent || !config.capabilities.includes('gmail')) return 0;
+
+    const props = PropertiesService.getScriptProperties();
+    const key = '_a8s_unmapped_digest_at';
+    const at = now || new Date();
+    const stored = props.getProperty(key);
+    const parsed = stored ? new Date(stored) : null;
+    const since = parsed && !isNaN(parsed.getTime())
+      ? parsed
+      : new Date(at.getTime() - 86400000);
+    if (at.getTime() - since.getTime() < 86400000) return 0;
+
+    const selves = selfEmailAddresses();
+    const query = `in:inbox after:${Math.floor(since.getTime() / 1000)}`;
+    const entries = [];
+    GmailApp.search(query).forEach(thread => {
+      thread.getMessages().forEach(msg => {
+        const date = msg.getDate();
+        const addr = normalizeEmailAddress(msg.getFrom());
+        if (date <= since || date > at || selves[addr] || isMappedMailMessage(msg, config)) return;
+        entries.push({
+          date,
+          from: msg.getFrom(),
+          subject: msg.getSubject() || '(no subject)'
+        });
+      });
+    });
+    entries.sort((a, b) => a.date - b.date);
+
+    if (entries.length) {
+      const lines = [
+        'Informational only — no action is required.',
+        `Unmapped mailbox activity since ${since.toISOString()}:`
+      ];
+      entries.forEach(entry => {
+        lines.push(`- ${entry.from} | ${entry.subject}`);
+      });
+      writeEnvelope(outbox, config.defaultAgent, lines.join('\n'));
+    }
+    props.setProperty(key, at.toISOString());
+    return entries.length ? 1 : 0;
+  }
+
   function saveAttachmentsToFiles(msg, filesFolder) {
     const attachments = msg.getAttachments();
     if (!attachments.length) return [];
@@ -877,6 +992,12 @@ const A8S = (() => {
   function resolveCalendarDestination(title, config) {
     const route = parseSubjectRoute(title || '');
     return route.agent || config.defaultAgent;
+  }
+
+  function resolveCalendarOutbox(config, mainOutbox) {
+    if (!config.schedFolderId) return mainOutbox;
+    const schedulerRoot = DriveApp.getFolderById(config.schedFolderId);
+    return getOrCreateSubfolder(schedulerRoot, '.outbox');
   }
 
   function pushUpcomingEvents(config, outbox, filesFolder) {
@@ -1020,34 +1141,50 @@ const A8S = (() => {
     return null;
   }
 
+  function sendNamedRouteEmail(envelope, config, filesFolder) {
+    const recipients = routeRecipients(envelope.to, config);
+    if (!recipients.length) return 'error: no recipients configured for route ' + (envelope.to || 'recipient');
+    if (!config.capabilities.includes('gmail')) return 'error: gmail capability not enabled';
+    const lines = String(envelope.content || '').split(/\r?\n/);
+    const subject = (lines.shift() || '').trim();
+    const body = lines.join('\n');
+    const attachments = collectFileAttachments(envelope, filesFolder);
+    const opts = {};
+    if (attachments.length) opts.attachments = attachments;
+    GmailApp.sendEmail(recipients.join(','), subject, body, opts);
+    return null;
+  }
+
   function processInboxEnvelope(envelope, config, filesFolder, outbox) {
     const route = decideInboxRoute(envelope, config);
 
     if (route === 'drop') {
-      console.log(`ignored message to "${envelope.to}" (not device or email principal)`);
+      console.log(`ignored message to "${envelope.to}" (not device, email principal, or named route)`);
       _logTransaction('a8s.command', `to=${envelope.to || ''} from=${envelope.from || ''}`, 'rejected: unknown to', '');
       return;
     }
 
-    if (route === 'email') {
-      // Opaque: tell <email-principal> always becomes a new outbound email (even /verbs).
+    if (route === 'email' || route === 'route') {
+      // Address nodes never execute slash commands and do not require command rights.
       try {
-        const err = sendOutboundEmail(envelope, config, filesFolder);
+        const err = route === 'route'
+          ? sendNamedRouteEmail(envelope, config, filesFolder)
+          : sendOutboundEmail(envelope, config, filesFolder);
         if (err) {
           if (envelope.from) writeEnvelope(outbox, envelope.from, err);
-          _logTransaction('a8s.command', `from=${envelope.from || ''} to=${envelope.to || ''}`, err, '');
+          _logTransaction('a8s.send', `from=${envelope.from || ''} route=${envelope.to || ''}`, err, '');
           return;
         }
         _logTransaction(
-          'a8s.push.email',
-          `outbound to=${addressForEmailAgent(envelope.to, config)} from=${envelope.from || ''}`,
+          'a8s.send',
+          `outbound route=${envelope.to || ''} from=${envelope.from || ''}`,
           'ok',
           ''
         );
       } catch (e) {
         const msg = 'error: send failed: ' + e.message;
         if (envelope.from) writeEnvelope(outbox, envelope.from, msg);
-        _logTransaction('a8s.command', `from=${envelope.from || ''} to=${envelope.to || ''}`, msg, '');
+        _logTransaction('a8s.send', `from=${envelope.from || ''} route=${envelope.to || ''}`, msg, '');
       }
       return;
     }
@@ -1118,7 +1255,18 @@ const A8S = (() => {
     }
 
     try {
-      const eventCount = pushUpcomingEvents(config, outbox, filesFolder);
+      const digestCount = pushUnmappedDigest(config, outbox);
+      if (digestCount > 0) {
+        _logTransaction('a8s.push.email', `default=${config.defaultAgent}`, 'ok (unmapped digest)', 'informational');
+      }
+    } catch (e) {
+      console.log(`unmapped digest failed: ${e.message}`);
+      _logTransaction('a8s.push.email', `default=${config.defaultAgent}`, 'error: digest: ' + e.message, '');
+    }
+
+    try {
+      const calendarOutbox = resolveCalendarOutbox(config, outbox);
+      const eventCount = pushUpcomingEvents(config, calendarOutbox, filesFolder);
       if (eventCount > 0) {
         _logTransaction('a8s.push.calendar', `default=${config.defaultAgent}`, `ok (${eventCount} events)`, '');
       }
@@ -1130,21 +1278,29 @@ const A8S = (() => {
 
   // --- Setup ---
 
+  function a8sHelp() {
+    Logger.log('A8S Script Properties:');
+    Logger.log('  A8S_ROOT_FOLDER_ID — primary Drive folder ID');
+    Logger.log('  A8S_SCHED_FOLDER_ID — optional scheduler Drive folder ID (calendar writes to its .outbox)');
+    Logger.log('  A8S_DEVICE — filedrop command node name (e.g. "my-google")');
+    Logger.log('  A8S_DEFAULT_AGENT — sticky push and digest destination (e.g. "agent")');
+    Logger.log('  A8S_EMAIL_MAP — JSON {"human@example.com":"human-mail"}');
+    Logger.log('  A8S_ROUTES — named recipients (e.g. "owner-mail=owner@example.com;team=a@example.com,b@example.com")');
+    Logger.log('  A8S_COMMAND_AGENTS — comma list allowed to run /commands; set empty for no command surface');
+    Logger.log('  CAPABILITIES — comma-delimited list (e.g. "gmail,calendar")');
+    Logger.log('  A8S_RESOLVE_UNMAPPED — "true" marks unmapped unread mail read after skipping (default: leave unread)');
+    Logger.log('  A8S_UNMAPPED_DIGEST — "true" pushes one informational digest per day (default: off)');
+    Logger.log('  TRIGGER_MINUTES — trigger interval: 1, 5, 10, 15, or 30 (default: 5)');
+    Logger.log('  MARKDOWN_AUTO — set to "false" to disable auto Markdown detection (default: on)');
+    Logger.log('One node, one face: use a second filedrop node on A8S_SCHED_FOLDER_ID for calendar pushes.');
+    Logger.log('Legacy: A8S_PARTICIPANT fills DEVICE + DEFAULT_AGENT when those are unset.');
+    Logger.log('Run enableLogging() to log transactions to "GAS Log YYYY-MM-DD" sheets.');
+  }
+
   function setup() {
     const props = PropertiesService.getScriptProperties();
     if (!props.getProperty('A8S_ROOT_FOLDER_ID')) {
-      Logger.log('Set Script Properties:');
-      Logger.log('  A8S_ROOT_FOLDER_ID — Drive folder ID');
-      Logger.log('  A8S_DEVICE — filedrop command node name (e.g. "my-google")');
-      Logger.log('  A8S_DEFAULT_AGENT — sticky push destination (e.g. "bob")');
-      Logger.log('  A8S_EMAIL_MAP — JSON {"human@example.com":"neil-email"}');
-      Logger.log('  A8S_COMMAND_AGENTS — comma list allowed to run /commands (e.g. "neil-phone,my-google")');
-      Logger.log('  CAPABILITIES — comma-delimited list (e.g. "gmail,calendar")');
-      Logger.log('  A8S_RESOLVE_UNMAPPED — "true" marks unmapped unread mail read after skipping (default: leave unread; only for a dedicated agent mailbox)');
-      Logger.log('  TRIGGER_MINUTES — trigger interval: 1, 5, 10, 15, or 30 (default: 5)');
-      Logger.log('  MARKDOWN_AUTO — set to "false" to disable auto Markdown detection (default: on)');
-      Logger.log('Legacy: A8S_PARTICIPANT fills DEVICE + DEFAULT_AGENT when those are unset.');
-      Logger.log('Run enableLogging() to log transactions to "GAS Log YYYY-MM-DD" sheets (same as GAS Bridge).');
+      a8sHelp();
       return;
     }
     Logger.log('Configuration OK. Run installTrigger() to activate.');
@@ -1180,12 +1336,21 @@ const A8S = (() => {
       Logger.log(`.inbox: ${getOrCreateSubfolder(root, '.inbox').getId()}`);
       Logger.log(`.outbox: ${getOrCreateSubfolder(root, '.outbox').getId()}`);
       Logger.log(`.files: ${getOrCreateSubfolder(root, '.files').getId()}`);
+      if (config.schedFolderId) {
+        const schedulerRoot = DriveApp.getFolderById(config.schedFolderId);
+        Logger.log(`Scheduler root: ${schedulerRoot.getName()} (${schedulerRoot.getId()})`);
+        Logger.log(`Scheduler .outbox: ${getOrCreateSubfolder(schedulerRoot, '.outbox').getId()}`);
+      } else {
+        Logger.log('Scheduler outbox: primary .outbox (A8S_SCHED_FOLDER_ID not set)');
+      }
       Logger.log(`Device: ${config.device || '(not set)'}`);
       Logger.log(`Default agent: ${config.defaultAgent || '(not set)'}`);
       Logger.log(`Email map: ${JSON.stringify(config.emailMap)}`);
+      Logger.log(`Named routes: ${JSON.stringify(config.routes)}`);
       Logger.log(`Command agents: ${config.commandAgents.join(', ') || '(none)'}`);
       Logger.log(`Capabilities: ${config.capabilities.join(', ') || '(none)'}`);
       Logger.log(`Trigger interval: ${config.triggerMinutes} minutes`);
+      Logger.log(`Unmapped digest: ${config.unmappedDigest ? 'on' : 'off'}`);
       Logger.log(`Markdown auto-detect: ${config.markdownAuto ? 'on' : 'off (MARKDOWN_AUTO=false)'}`);
       Logger.log(`Transaction logging: ${_loggingEnabled() ? 'on' : 'off (run enableLogging())'}`);
       Logger.log(`marked global: ${typeof marked !== 'undefined' ? 'available' : 'MISSING — check vendor/marked.js'}`);
@@ -1198,6 +1363,7 @@ const A8S = (() => {
   return {
     onTrigger,
     setup,
+    a8sHelp,
     installTrigger,
     removeTrigger,
     testConnection,
@@ -1209,15 +1375,17 @@ const A8S = (() => {
     disableLogging,
     _testing: {
       ulid, parseCommand, formatEmailForAgent, formatEventForAgent, writeEnvelope, routeMessage,
-      handleGmail, pushNewEmails, selfEmailAddresses,
+      handleGmail, pushNewEmails, pushUnmappedDigest, selfEmailAddresses,
       pad, extractDriveLinks, exportDocAsMarkdown, downloadDriveFile, hashPrefix, getConfig,
       describeAge, formatMessageTag,
       detectMarkdown, bodyForMarkdownDetection, parseMarkdownFlags, effectiveMarkdownMode,
       sanitizeHtml, buildHtmlBody, buildMailOpts, formatMarkdownLogNotes, formatCommandParams,
-      formatLogStatus, toLogAction, normalizeEmailAddress, parseEmailMap, parseCommandAgents,
+      formatLogStatus, toLogAction, normalizeEmailAddress, parseEmailMap, parseRoutes, parseCommandAgents,
       stripReplyPrefixes, parseSubjectRoute, resolveEmailPush, addressForEmailAgent,
-      isEmailPrincipal, isDeviceTarget, decideInboxRoute, isCommandAgent,
-      resolveCalendarDestination, processInboxEnvelope, sendOutboundEmail
+      isEmailPrincipal, routeRecipients, isNamedRoute, isDeviceTarget, decideInboxRoute, isCommandAgent,
+      isMappedMailMessage, latestMappedUnreadMessage, isReadableMailThread, mappedFromQuery,
+      resolveCalendarDestination, resolveCalendarOutbox, pushUpcomingEvents, processInboxEnvelope,
+      sendOutboundEmail, sendNamedRouteEmail
     }
   };
 
@@ -1225,6 +1393,7 @@ const A8S = (() => {
 
 function onTrigger()      { A8S.onTrigger(); }
 function setup()          { A8S.setup(); }
+function a8sHelp()        { A8S.a8sHelp(); }
 function installTrigger() { A8S.installTrigger(); }
 function removeTrigger()  { A8S.removeTrigger(); }
 function testConnection() { A8S.testConnection(); }
