@@ -1,12 +1,12 @@
 /*
- * A8S v1.3 — Agent-to-agent messaging via Google Drive
+ * A8S v1.4 — Agent-to-agent messaging via Google Drive
  *
  * Polls .inbox/ for commands, routes email/calendar like an SMS bridge,
  * writes .outbox/ envelopes.
  */
 const A8S = (() => {
 
-  const VERSION = '1.3';
+  const VERSION = '1.4';
 
   const CROCKFORD = '0123456789ABCDEFGHJKMNPQRSTVWXYZ';
 
@@ -800,13 +800,55 @@ const A8S = (() => {
 
   // --- Email Push (mapped unread → sticky/@ route → mark READ) ---
 
-  function formatEmailForAgent(msg, subjectRest, now) {
+  // A pushed email must read like a message from its principal, not like
+  // email: the reply chain, mailto artifacts, and every known address are
+  // transport internals the agent must never see.
+  function stripQuotedReply(body) {
+    const markers = [
+      /^-{2,}\s*Original Message\s*-{2,}\s*$/im,
+      /^_{10,}\s*$/m,
+      /^On [\s\S]{0,300}?wrote:\s*$/m,
+    ];
+    let cut = body.length;
+    markers.forEach(re => {
+      const m = re.exec(body);
+      if (m && m.index < cut) cut = m.index;
+    });
+    return body
+      .slice(0, cut)
+      .split('\n')
+      .filter(line => !/^\s*>/.test(line))
+      .join('\n');
+  }
+
+  function sanitizeEmailBody(text, config) {
+    let out = stripQuotedReply(text);
+    out = out.replace(/<mailto:[^>\s]*>/gi, '').replace(/\bmailto:[^\s>]+/gi, '');
+    out = replaceKnownAddresses(out, config);
+    return out.replace(/\n{3,}/g, '\n\n').replace(/[ \t]+$/gm, '').trim();
+  }
+
+  function replaceKnownAddresses(text, config) {
+    let out = text;
+    const swap = (addr, name) => {
+      const esc = addr.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      out = out.replace(new RegExp('<\\s*' + esc + '\\s*>|' + esc, 'gi'), name);
+    };
+    const map = (config && config.emailMap) || {};
+    Object.keys(map).forEach(addr => swap(addr, map[addr]));
+    const device = (config && config.device) || 'the switchboard';
+    Object.keys(selfEmailAddresses()).forEach(addr => swap(addr, device));
+    return out;
+  }
+
+  function formatEmailForAgent(msg, subjectRest, config, now) {
     const at = now || new Date();
     let body = msg.getPlainBody() || '';
     if (body.length > 4000) body = body.substring(0, 4000) + '\n[truncated]';
+    body = sanitizeEmailBody(body, config);
     const date = msg.getDate();
-    const header = `From: ${msg.getFrom()}\nDate: ${date.toISOString()} (${describeAge(date, at)})`;
-    const rest = (subjectRest || '').trim();
+    const header = `Date: ${date.toISOString()} (${describeAge(date, at)})`;
+    const rest = replaceKnownAddresses((subjectRest || '').trim(), config);
     if (rest && body) return `${header}\n\n${rest}\n\n${body}`;
     return `${header}\n\n${rest || body}`;
   }
@@ -841,7 +883,7 @@ const A8S = (() => {
           }
           return;
         }
-        const content = formatEmailForAgent(msg, decision.subjectRest);
+        const content = formatEmailForAgent(msg, decision.subjectRest, config);
         const files = saveAttachmentsToFiles(msg, filesFolder);
         writeEnvelope(outbox, decision.to, content, files, filesFolder, decision.fromAgent);
         msg.markRead();
@@ -1374,7 +1416,7 @@ const A8S = (() => {
     enableLogging,
     disableLogging,
     _testing: {
-      ulid, parseCommand, formatEmailForAgent, formatEventForAgent, writeEnvelope, routeMessage,
+      ulid, parseCommand, formatEmailForAgent, sanitizeEmailBody, stripQuotedReply, formatEventForAgent, writeEnvelope, routeMessage,
       handleGmail, pushNewEmails, pushUnmappedDigest, selfEmailAddresses,
       pad, extractDriveLinks, exportDocAsMarkdown, downloadDriveFile, hashPrefix, getConfig,
       describeAge, formatMessageTag,
