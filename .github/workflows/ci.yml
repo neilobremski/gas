@@ -2,10 +2,25 @@ name: ci
 
 on:
   pull_request:
+    types: [opened, edited, reopened, synchronize]
+  issues:
+    types: [opened, edited]
   push:
     branches: [main]
 
 jobs:
+  pii-text-check:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request' || github.event_name == 'issues'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check PR/issue title and description for PII
+        env:
+          PII_PATTERNS: ${{ secrets.PII_PATTERNS }}
+          TITLE: ${{ github.event.pull_request.title || github.event.issue.title }}
+          BODY: ${{ github.event.pull_request.body || github.event.issue.body }}
+        run: printf '%s\n%s\n' "$TITLE" "$BODY" | python3 .github/pii_check.py --stdin
+
   pii-check:
     runs-on: ubuntu-latest
     if: github.event_name == 'pull_request'
@@ -32,6 +47,7 @@ jobs:
 
   a8s:
     runs-on: ubuntu-latest
+    if: github.event_name != 'issues'
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4

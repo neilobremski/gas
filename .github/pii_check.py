@@ -12,6 +12,14 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 LOCAL_PATTERNS_FILE = Path(__file__).resolve().parent / "pii-patterns.local.txt"
 EXAMPLE_PATTERNS_FILE = Path(__file__).resolve().parent / "pii-patterns.example.txt"
 
+# Always enforced, on top of the configured patterns: a public repo never
+# carries a real email address. Placeholder domains and known-noreply
+# senders are exempt.
+GENERIC_EMAIL_PATTERN = (
+    r"[A-Za-z0-9._%+-]+@(?!example\.)(?!users\.noreply\.)(?!anthropic\.com)"
+    r"[A-Za-z0-9][A-Za-z0-9.-]*\.[A-Za-z]{2,}"
+)
+
 
 def parse_patterns(text: str) -> list[str]:
     return [
@@ -24,9 +32,11 @@ def parse_patterns(text: str) -> list[str]:
 def load_patterns() -> list[str]:
     env = os.environ.get("PII_PATTERNS", "").strip()
     if env:
-        return parse_patterns(env)
+        return parse_patterns(env) + [GENERIC_EMAIL_PATTERN]
     if LOCAL_PATTERNS_FILE.is_file():
-        return parse_patterns(LOCAL_PATTERNS_FILE.read_text(encoding="utf-8"))
+        return parse_patterns(LOCAL_PATTERNS_FILE.read_text(encoding="utf-8")) + [
+            GENERIC_EMAIL_PATTERN
+        ]
     raise FileNotFoundError(
         "PII patterns not configured.\n"
         f"  Local: copy {EXAMPLE_PATTERNS_FILE.name} to {LOCAL_PATTERNS_FILE.name}\n"
@@ -96,6 +106,16 @@ def check_branch(repo_root: Path | None = None, range_spec: str | None = None) -
     return check_diff(diff)
 
 
+def check_text(text: str, patterns: list[str]) -> list[tuple[str, int]]:
+    hits: list[tuple[str, int]] = []
+    for lineno, line in enumerate(text.splitlines(), start=1):
+        for pattern in patterns:
+            if re.search(pattern, line, re.IGNORECASE):
+                hits.append((pattern, lineno))
+                break
+    return hits
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Check a git diff for PII patterns.")
     parser.add_argument(
@@ -103,11 +123,30 @@ def main(argv: list[str] | None = None) -> int:
         metavar="REV",
         help="git diff range to scan (default: origin/main...HEAD or main...HEAD)",
     )
+    parser.add_argument(
+        "--stdin",
+        action="store_true",
+        help="scan text from stdin (e.g. a PR or issue description) instead of a diff",
+    )
     args = parser.parse_args(argv)
     try:
         patterns = load_patterns()
     except FileNotFoundError as e:
         print(str(e), file=sys.stderr)
+        return 1
+    if args.stdin:
+        # The scanned text may not be public yet, so report positions only —
+        # echoing the match would copy the PII into the CI log.
+        text_hits = check_text(sys.stdin.read(), patterns)
+        if not text_hits:
+            print("No PII patterns found in text.")
+            return 0
+        for pattern, lineno in text_hits[:20]:
+            print(f"PII pattern {pattern!r} on line {lineno}", file=sys.stderr)
+        print(
+            f"\nRemove PII from the description. {len(patterns)} pattern(s) loaded.",
+            file=sys.stderr,
+        )
         return 1
     violations = check_branch(range_spec=args.range)
     if not violations:
