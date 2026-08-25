@@ -8,7 +8,13 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / ".github"))
 
-from pii_check import check_diff, load_patterns, parse_patterns  # noqa: E402
+from pii_check import (  # noqa: E402
+    GENERIC_EMAIL_PATTERN,
+    check_diff,
+    check_text,
+    load_patterns,
+    parse_patterns,
+)
 
 SAMPLE_PATTERNS = "example-agent-name\nexample-hostname\nexample\\.host\\.example\n"
 
@@ -55,13 +61,54 @@ def test_load_patterns_requires_env_or_local_file():
         pass
 
 
+def test_generic_email_pattern_is_always_loaded():
+    os.environ["PII_PATTERNS"] = SAMPLE_PATTERNS
+    assert GENERIC_EMAIL_PATTERN in load_patterns()
+
+
+def test_generic_email_pattern_catches_real_addresses_in_diff():
+    diff = "\n".join(
+        [
+            "diff --git a/notes.md b/notes.md",
+            "+++ b/notes.md",
+            "+contact " + "person@" + "somewhere.net" + " about the rollout",
+        ]
+    )
+    hits = check_diff(diff, [GENERIC_EMAIL_PATTERN])
+    assert any(p == GENERIC_EMAIL_PATTERN for p, _ in hits)
+
+
+def test_generic_email_pattern_allows_placeholder_domains():
+    for line in (
+        "write agent@example.com",
+        "bot@users.noreply.github.com signed it",
+        "Co-Authored-By: Claude <noreply@anthropic.com>",
+    ):
+        assert check_text(line, [GENERIC_EMAIL_PATTERN]) == [], line
+
+
+def test_check_text_reports_line_numbers_without_content():
+    text = "clean title\nreach example-agent-name today\nclean tail"
+    hits = check_text(text, parse_patterns(SAMPLE_PATTERNS))
+    assert hits == [("example-agent-name", 2)]
+
+
+def test_check_text_clean_text_has_no_hits():
+    assert check_text("a title\na clean body", parse_patterns(SAMPLE_PATTERNS)) == []
+
+
 def main():
     os.environ["PII_PATTERNS"] = SAMPLE_PATTERNS
     test_example_agent_name_is_registered_pii_pattern()
     test_pii_check_catches_example_agent_name_in_added_line()
     test_pii_check_ignores_example_com_addresses()
     test_load_patterns_requires_env_or_local_file()
-    print("4 tests passed")
+    test_generic_email_pattern_is_always_loaded()
+    test_generic_email_pattern_catches_real_addresses_in_diff()
+    test_generic_email_pattern_allows_placeholder_domains()
+    test_check_text_reports_line_numbers_without_content()
+    test_check_text_clean_text_has_no_hits()
+    print("9 tests passed")
 
 
 if __name__ == "__main__":

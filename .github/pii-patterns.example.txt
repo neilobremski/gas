@@ -9,7 +9,13 @@
 #   Repository secret PII_PATTERNS — same format, one regex per line.
 #   After editing the local file: .github/sync-pii-patterns.sh
 #
-# Enforced by .github/pii_check.py (pre-push hook + CI).
+# Enforced by .github/pii_check.py (pre-push hook + CI). CI also scans PR
+# and issue titles/descriptions (the pii-text-check job).
+#
+# A generic email-address pattern is built into pii_check.py and always
+# enforced on top of this list — use @example.com addresses in tests and
+# docs. This file is for names, hosts, phone numbers, and anything else
+# specific to you.
 
 # Private names — replace with your own in the local copy
 example-agent-name
