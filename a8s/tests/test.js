@@ -391,6 +391,8 @@ function formatLogStatus(response) {
 // The production implementations, loaded above — no mirrors to drift.
 const { describeAge, formatMessageTag } = realA8S;
 const formatEmailForAgent = realA8S.formatEmailForAgent;
+const sanitizeEmailBody = realA8S.sanitizeEmailBody;
+const stripQuotedReply = realA8S.stripQuotedReply;
 
 function pushNewEmails(gmailApp, config, outbox, filesFolder) {
   global.GmailApp = gmailApp;
@@ -874,11 +876,11 @@ function handleCalendar(command, args) {
     date: '2026-01-15T10:30:00Z',
     body: 'Hello there'
   });
-  const result = formatEmailForAgent(msg, 'the thing', now);
+  const result = formatEmailForAgent(msg, 'the thing', {}, now);
   assertEqual(
     result,
-    'From: alice@example.com\nDate: 2026-01-15T10:30:00.000Z (today)\n\nthe thing\n\nHello there',
-    'formatEmail: header + subject rest + body'
+    'Date: 2026-01-15T10:30:00.000Z (today)\n\nthe thing\n\nHello there',
+    'formatEmail: header + subject rest + body, no From line'
   );
 })();
 
@@ -891,9 +893,9 @@ function handleCalendar(command, args) {
     body: 'Hello there'
   });
   assertEqual(
-    formatEmailForAgent(msg, '', now),
-    'From: alice@example.com\nDate: 2026-01-15T10:30:00.000Z (3 days ago)\n\nHello there',
-    'formatEmail: header + body only when no rest'
+    formatEmailForAgent(msg, '', {}, now),
+    'Date: 2026-01-15T10:30:00.000Z (3 days ago)\n\nHello there',
+    'formatEmail: header + body only when no rest, no From line'
   );
 })();
 
@@ -1111,7 +1113,7 @@ function handleCalendar(command, args) {
   assert(!unmapped.isUnread(), 'pushNewEmails: unmapped no longer unread');
   assert(!mapped.isUnread(), 'pushNewEmails: mapped marked read after route');
   assertEqual(outbox.getFiles().length, 1, 'pushNewEmails: one envelope written');
-  assert(outbox.getFiles()[0].content.includes('From: human@example.com'), 'pushNewEmails: envelope content carries sender header');
+  assert(!outbox.getFiles()[0].content.includes('From:'), 'pushNewEmails: envelope content has no From header (opaque push)');
   assert(outbox.getFiles()[0].content.includes('Date: 2026-08-21T10:00:00.000Z'), 'pushNewEmails: envelope content carries date header');
 })();
 
@@ -1123,9 +1125,73 @@ function handleCalendar(command, args) {
     date: '2026-01-15T10:30:00Z',
     body: longBody
   });
-  const result = formatEmailForAgent(msg, '');
+  const result = formatEmailForAgent(msg, '', {});
   assert(result.includes('[truncated]'), 'formatEmail: truncates body over 4000 chars');
   assert(!result.includes('x'.repeat(5000)), 'formatEmail: body is actually shorter');
+})();
+
+// --- sanitizeEmailBody() / stripQuotedReply(): opaque push, no transport leakage ---
+
+(() => {
+  const config = { emailMap: { 'neil@example.com': 'neil-email' }, device: 'my-google' };
+  const body = 'Just fine thanks\n\n-N\n\nOn Mon, Aug 24, 2026, at 6:24 PM, agent@example.com\nwrote:\n\n> Hey, how is it going?';
+  const result = sanitizeEmailBody(body, config);
+  assertEqual(
+    result,
+    'Just fine thanks\n\n-N',
+    'sanitizeEmailBody: everything from the "On ... wrote:" marker on is stripped'
+  );
+})();
+
+(() => {
+  const body = 'New content here.\n\n-----Original Message-----\nFrom: someone@example.com\nSubject: Re: hi\n\n> quoted text';
+  const result = sanitizeEmailBody(body, {});
+  assertEqual(
+    result,
+    'New content here.',
+    'sanitizeEmailBody: "-----Original Message-----" marker cuts the reply chain'
+  );
+})();
+
+(() => {
+  const config = { emailMap: { 'neil@example.com': 'neil-email' }, device: 'my-google' };
+  const body = 'neil@example.com mailto:neil@example.com';
+  const result = sanitizeEmailBody(body, config);
+  assertEqual(result, 'neil-email', 'sanitizeEmailBody: mailto token removed, mapped address replaced');
+})();
+
+(() => {
+  global._testActiveEmail = '';
+  global._testEffectiveEmail = 'agent@example.com';
+  const config = { device: 'my-google' };
+  const body = 'Please loop in agent@example.com on this.';
+  const result = sanitizeEmailBody(body, config);
+  assertEqual(
+    result,
+    'Please loop in my-google on this.',
+    'sanitizeEmailBody: a self address is replaced with the device name'
+  );
+  global._testEffectiveEmail = '';
+})();
+
+(() => {
+  const body = 'Some intro.\n> quoted line one\n> quoted line two\nMore text.';
+  const result = sanitizeEmailBody(body, {});
+  assertEqual(
+    result,
+    'Some intro.\nMore text.',
+    'sanitizeEmailBody: bare ">" quoted lines dropped even without a marker'
+  );
+})();
+
+(() => {
+  const body = 'Paragraph one.\n\n\n\nParagraph two.';
+  const result = sanitizeEmailBody(body, {});
+  assertEqual(
+    result,
+    'Paragraph one.\n\nParagraph two.',
+    'sanitizeEmailBody: 3+ newlines collapse to a single blank line'
+  );
 })();
 
 // --- pushUnmappedDigest(): opt-in, informational, daily, non-destructive ---
