@@ -1836,6 +1836,94 @@ function handleCalendar(command, args) {
   assertEqual(formatLogStatus('error: missing thread_id'), 'error: missing thread_id', 'formatLogStatus: error');
 })();
 
+// --- Outbound email renders markdown on every path, not just /send ---
+
+(() => {
+  // The named route (`tell neil-email ...`) is how an agent mails a human
+  // since v1.3. It skipped the markdown conversion `/send` had all along, so
+  // moving an agent off the command surface silently took its formatting away.
+  const sent = [];
+  global.GmailApp = createMockGmailApp({ onSendEmail: (m) => sent.push(m) });
+  const config = {
+    capabilities: ['gmail'],
+    markdownAuto: true,
+    routes: { 'neil-email': ['human@example.com'] }
+  };
+  const envelope = {
+    to: 'neil-email',
+    from: 'agent',
+    content: 'Morning Report\n\n## Headline\n\n- first\n- second'
+  };
+  assertEqual(
+    realA8S.sendNamedRouteEmail(envelope, config, null),
+    null,
+    'route email: sends without error'
+  );
+  assertEqual(sent.length, 1, 'route email: one message');
+  assertEqual(sent[0].subject, 'Morning Report', 'route email: first line is the subject');
+  assert(sent[0].opts.htmlBody, 'route email: carries an htmlBody');
+  assert(sent[0].opts.htmlBody.includes('<h2>'), 'route email: heading became HTML');
+  assert(sent[0].opts.htmlBody.includes('<li>'), 'route email: list became HTML');
+  assert(sent[0].body.includes('## Headline'), 'route email: plain part keeps the markdown');
+  global.GmailApp = null;
+})();
+
+(() => {
+  const sent = [];
+  global.GmailApp = createMockGmailApp({ onSendEmail: (m) => sent.push(m) });
+  const config = {
+    capabilities: ['gmail'],
+    markdownAuto: true,
+    emailMap: { 'human@example.com': 'neil-mail' }
+  };
+  realA8S.sendOutboundEmail(
+    { to: 'neil-mail', from: 'agent', content: '**bold** and `code`' },
+    config,
+    null
+  );
+  assertEqual(sent.length, 1, 'principal email: one message');
+  assert(sent[0].opts.htmlBody, 'principal email: carries an htmlBody');
+  assert(sent[0].opts.htmlBody.includes('<strong>'), 'principal email: bold became HTML');
+  global.GmailApp = null;
+})();
+
+(() => {
+  // Plain prose is left plain on both paths — the detector, not the path,
+  // decides, exactly as it does for /send.
+  const sent = [];
+  global.GmailApp = createMockGmailApp({ onSendEmail: (m) => sent.push(m) });
+  const config = {
+    capabilities: ['gmail'],
+    markdownAuto: true,
+    routes: { 'neil-email': ['human@example.com'] }
+  };
+  realA8S.sendNamedRouteEmail(
+    { to: 'neil-email', from: 'agent', content: 'Subject line\n\nJust a sentence.' },
+    config,
+    null
+  );
+  assert(!sent[0].opts.htmlBody, 'route email: no html for plain prose');
+  global.GmailApp = null;
+})();
+
+(() => {
+  // MARKDOWN_AUTO=false still turns it off everywhere.
+  const sent = [];
+  global.GmailApp = createMockGmailApp({ onSendEmail: (m) => sent.push(m) });
+  const config = {
+    capabilities: ['gmail'],
+    markdownAuto: false,
+    routes: { 'neil-email': ['human@example.com'] }
+  };
+  realA8S.sendNamedRouteEmail(
+    { to: 'neil-email', from: 'agent', content: 'Subject\n\n## Heading' },
+    config,
+    null
+  );
+  assert(!sent[0].opts.htmlBody, 'route email: markdownAuto off disables conversion');
+  global.GmailApp = null;
+})();
+
 // --- Report ---
 
 console.log(`\n${passed + failed} tests, ${passed} passed, ${failed} failed`);
