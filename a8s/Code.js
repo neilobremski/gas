@@ -1,12 +1,12 @@
 /*
- * A8S v1.4 — Agent-to-agent messaging via Google Drive
+ * A8S v1.5 — Agent-to-agent messaging via Google Drive
  *
  * Polls .inbox/ for commands, routes email/calendar like an SMS bridge,
  * writes .outbox/ envelopes.
  */
 const A8S = (() => {
 
-  const VERSION = '1.4';
+  const VERSION = '1.5';
 
   const CROCKFORD = '0123456789ABCDEFGHJKMNPQRSTVWXYZ';
 
@@ -1177,8 +1177,7 @@ const A8S = (() => {
     const subject = '@' + fromAgent;
     const body = envelope.content || '';
     const attachments = collectFileAttachments(envelope, filesFolder);
-    const opts = {};
-    if (attachments.length) opts.attachments = attachments;
+    const { opts } = buildMailOpts(body, [], config, attachments);
     GmailApp.sendEmail(addr, subject, body, opts);
     return null;
   }
@@ -1191,8 +1190,7 @@ const A8S = (() => {
     const subject = (lines.shift() || '').trim();
     const body = lines.join('\n');
     const attachments = collectFileAttachments(envelope, filesFolder);
-    const opts = {};
-    if (attachments.length) opts.attachments = attachments;
+    const { opts } = buildMailOpts(body, [], config, attachments);
     GmailApp.sendEmail(recipients.join(','), subject, body, opts);
     return null;
   }
