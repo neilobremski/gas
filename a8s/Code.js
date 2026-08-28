@@ -1,12 +1,12 @@
 /*
- * A8S v1.5 — Agent-to-agent messaging via Google Drive
+ * A8S v1.6 — Agent-to-agent messaging via Google Drive
  *
  * Polls .inbox/ for commands, routes email/calendar like an SMS bridge,
  * writes .outbox/ envelopes.
  */
 const A8S = (() => {
 
-  const VERSION = '1.5';
+  const VERSION = '1.6';
 
   const CROCKFORD = '0123456789ABCDEFGHJKMNPQRSTVWXYZ';
 
@@ -264,7 +264,16 @@ const A8S = (() => {
       files.forEach(f => {
         const filename = (f.filename || '').trim();
         if (!filename) return;
-        copyFileToBundle(filesFolder, bundle, filename);
+        // An entry carrying `text` is generated here rather than staged in
+        // `.files`, so it goes straight into the bundle the recipient reads.
+        // Staging it would put a same-named file in a shared folder that is
+        // never swept, and `copyFileToBundle` resolves a name to whichever
+        // copy Drive hands back first.
+        if (typeof f.text === 'string') {
+          bundle.createFile(filename, f.text, 'text/markdown');
+        } else {
+          copyFileToBundle(filesFolder, bundle, filename);
+        }
         normalized.push({ filename });
       });
       if (normalized.length) envelope.files = normalized;
@@ -843,14 +852,35 @@ const A8S = (() => {
 
   function formatEmailForAgent(msg, subjectRest, config, now) {
     const at = now || new Date();
-    let body = msg.getPlainBody() || '';
-    if (body.length > 4000) body = body.substring(0, 4000) + '\n[truncated]';
-    body = sanitizeEmailBody(body, config);
+    const body = sanitizeEmailBody(msg.getPlainBody() || '', config);
     const date = msg.getDate();
     const header = `Date: ${date.toISOString()} (${describeAge(date, at)})`;
     const rest = replaceKnownAddresses((subjectRest || '').trim(), config);
     if (rest && body) return `${header}\n\n${rest}\n\n${body}`;
     return `${header}\n\n${rest || body}`;
+  }
+
+  // A long email is not a reason to lose most of it. Past the cap the body
+  // carries what fits and the whole text rides along as a file, so nothing is
+  // discarded and the agent is told where the rest went. The cap bounds one
+  // turn's prompt, not the message: r4t caps again per rig, and only it knows
+  // what the rig's model can hold.
+  const MAX_PUSH_BODY_CHARS = 50000;
+  const OVERFLOW_FILENAME = 'message.md';
+
+  function splitOversizeMessage(content, taken) {
+    if (content.length <= MAX_PUSH_BODY_CHARS) return { content, overflow: null };
+    const used = taken || [];
+    let filename = OVERFLOW_FILENAME;
+    let n = 2;
+    while (used.indexOf(filename) !== -1) filename = `message-${n++}.md`;
+    const kept = content.substring(0, MAX_PUSH_BODY_CHARS);
+    const dropped = content.length - kept.length;
+    return {
+      content: `${kept}\n\n[... truncated; ${dropped} more characters are in `
+        + `the attached ${filename}, which holds the whole message]`,
+      overflow: { filename, text: content }
+    };
   }
 
   function pushNewEmails(config, outbox, filesFolder) {
@@ -883,9 +913,13 @@ const A8S = (() => {
           }
           return;
         }
-        const content = formatEmailForAgent(msg, decision.subjectRest, config);
         const files = saveAttachmentsToFiles(msg, filesFolder);
-        writeEnvelope(outbox, decision.to, content, files, filesFolder, decision.fromAgent);
+        const split = splitOversizeMessage(
+          formatEmailForAgent(msg, decision.subjectRest, config),
+          files.map(f => f.filename)
+        );
+        if (split.overflow) files.push(split.overflow);
+        writeEnvelope(outbox, decision.to, split.content, files, filesFolder, decision.fromAgent);
         msg.markRead();
         count++;
         _logTransaction(
@@ -1414,7 +1448,7 @@ const A8S = (() => {
     enableLogging,
     disableLogging,
     _testing: {
-      ulid, parseCommand, formatEmailForAgent, sanitizeEmailBody, stripQuotedReply, formatEventForAgent, writeEnvelope, routeMessage,
+      ulid, parseCommand, formatEmailForAgent, splitOversizeMessage, sanitizeEmailBody, stripQuotedReply, formatEventForAgent, writeEnvelope, routeMessage,
       handleGmail, pushNewEmails, pushUnmappedDigest, selfEmailAddresses,
       pad, extractDriveLinks, exportDocAsMarkdown, downloadDriveFile, hashPrefix, getConfig,
       describeAge, formatMessageTag,

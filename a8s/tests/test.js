@@ -391,6 +391,7 @@ function formatLogStatus(response) {
 // The production implementations, loaded above — no mirrors to drift.
 const { describeAge, formatMessageTag } = realA8S;
 const formatEmailForAgent = realA8S.formatEmailForAgent;
+const splitOversizeMessage = realA8S.splitOversizeMessage;
 const sanitizeEmailBody = realA8S.sanitizeEmailBody;
 const stripQuotedReply = realA8S.stripQuotedReply;
 
@@ -1117,6 +1118,9 @@ function handleCalendar(command, args) {
   assert(outbox.getFiles()[0].content.includes('Date: 2026-08-21T10:00:00.000Z'), 'pushNewEmails: envelope content carries date header');
 })();
 
+// --- an ordinary email is not truncated ---------------------------------
+// 4000 characters is about 600 words. A cap there cut normal mail in half.
+
 (() => {
   const longBody = 'x'.repeat(5000);
   const msg = createMockMessage({
@@ -1126,8 +1130,80 @@ function handleCalendar(command, args) {
     body: longBody
   });
   const result = formatEmailForAgent(msg, '', {});
-  assert(result.includes('[truncated]'), 'formatEmail: truncates body over 4000 chars');
-  assert(!result.includes('x'.repeat(5000)), 'formatEmail: body is actually shorter');
+  assert(result.includes(longBody), 'formatEmail: a 5000-char body arrives whole');
+  assert(!result.includes('truncated'), 'formatEmail: and is not marked truncated');
+})();
+
+// --- splitOversizeMessage(): nothing is discarded, only moved -------------
+
+(() => {
+  const body = 'y'.repeat(60000);
+  const split = splitOversizeMessage(body, []);
+  assert(split.overflow !== null, 'split: a 60k body overflows');
+  assertEqual(split.overflow.filename, 'message.md', 'split: names the file message.md');
+  assertEqual(split.overflow.text, body, 'split: the file holds the WHOLE message, not the tail');
+  assert(split.content.includes('truncated'), 'split: the body says it was truncated');
+  assert(split.content.includes('message.md'), 'split: and names the file to open');
+  assert(split.content.startsWith('y'.repeat(50000)), 'split: keeps the first 50k');
+  assert(split.content.indexOf('10000 more characters') !== -1,
+         'split: says how much moved');
+})();
+
+(() => {
+  const body = 'z'.repeat(50000);
+  const split = splitOversizeMessage(body, []);
+  assertEqual(split.overflow, null, 'split: exactly at the cap does not overflow');
+  assertEqual(split.content, body, 'split: and is passed through untouched');
+})();
+
+(() => {
+  // A real attachment already called message.md must not be shadowed.
+  const split = splitOversizeMessage('w'.repeat(60000), ['message.md']);
+  assertEqual(split.overflow.filename, 'message-2.md',
+              'split: steps aside when the name is taken');
+  assert(split.content.includes('message-2.md'), 'split: the note names the file it used');
+})();
+
+// --- the push writes the overflow into the bundle, not into .files --------
+
+(() => {
+  const config = {
+    defaultAgent: 'agent',
+    capabilities: ['gmail'],
+    emailMap: { 'bob@example.com': 'bob-mail' },
+    routes: {},
+    commandAgents: []
+  };
+  const msg = createMockMessage({
+    from: 'bob@example.com',
+    subject: 'War and Peace',
+    date: '2026-08-27T10:00:00Z',
+    body: 'q'.repeat(70000),
+    unread: true
+  });
+  const gmailApp = createMockGmailApp({ threads: [createMockThread('t1', [msg])] });
+  const outbox = createMockOutbox();
+  const filesFolder = createMockFilesFolder();
+  const count = pushNewEmails(gmailApp, config, outbox, filesFolder);
+  assertEqual(count, 1, 'push oversize: one envelope written');
+  const envelope = JSON.parse(outbox.getFiles()[0].content);
+  assertEqual(envelope.files.length, 1, 'push oversize: envelope lists one file');
+  assertEqual(envelope.files[0].filename, 'message.md', 'push oversize: named message.md');
+  assert(!('text' in envelope.files[0]),
+         'push oversize: the inline text does not leak into the envelope JSON');
+  const bundle = outbox._subfolders[envelope.id];
+  assert(bundle, 'push oversize: a bundle folder was created');
+  const stored = bundle.getFilesByName('message.md');
+  assert(stored.hasNext(), 'push oversize: the whole message is in the bundle');
+  const storedText = stored.next().getBlob();
+  assert(storedText.includes('q'.repeat(70000)),
+         'push oversize: the file holds the whole body, not the tail');
+  assert(storedText.startsWith('Date: '),
+         'push oversize: and the message as the agent would read it, header and all');
+  assert(!filesFolder.getFilesByName('message.md').hasNext(),
+         'push oversize: nothing was staged in the shared .files folder');
+  assert(envelope.content.includes('message.md'),
+         'push oversize: the body points at the file');
 })();
 
 // --- sanitizeEmailBody() / stripQuotedReply(): opaque push, no transport leakage ---
