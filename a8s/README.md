@@ -155,7 +155,7 @@ Every trigger cycle, checks **unread** emails:
 1. Normalize `From:` and require an `A8S_EMAIL_MAP` hit (value = email principal name, e.g. `human-mail`)
 2. Resolve destination via `@agent` or sticky default
 3. Stage attachments under `.outbox/<msg_id>/`
-4. Write SMS-like content — a `From:` / `Date:` header (with relative age), optional subject remainder, body truncated at 4KB — with `from` = email principal
+4. Write SMS-like content — a `Date:` header (with relative age), optional subject remainder, then the sanitized body — with `from` = email principal. Opaque push emits no `From:`: the sender is the email principal, and the reply chain and every known address are transport internals the agent never sees. A body over **50,000 characters** is cut at that point and the *whole* formatted message is written to `.outbox/<msg_id>/message.md`, with the inline text ending in a note naming the file and how many characters moved. Nothing is discarded (`message-2.md` if an attachment already claims the name)
 5. Mark read **only after** a successful route
 
 **Re-push:** Mark an email as UNREAD in Gmail → next trigger picks it up again (still must be mapped).

@@ -1164,6 +1164,48 @@ function handleCalendar(command, args) {
   assert(split.content.includes('message-2.md'), 'split: the note names the file it used');
 })();
 
+// --- sanitize runs BEFORE the size split, at both old and new boundaries --
+// The order is the fix, not an implementation detail. stripQuotedReply matches
+// "On <date> <person> wrote:" as one marker; a cut landing inside it leaves the
+// marker unmatched and the quoted chain leaks into the agent's message. These
+// put the marker exactly where each cap would land.
+
+(() => {
+  const config = { emailMap: { 'neil@example.com': 'neil-email' }, device: 'my-google' };
+  const marker = '\n\nOn Wed, Aug 26, 2026, at 6:24 PM, agent@example.com\nwrote:\n\n';
+  const quoted = '> prior thread content the agent must never see';
+
+  // Straddling the OLD 4000-char cap.
+  const msgOld = createMockMessage({
+    from: 'neil@example.com',
+    subject: 'Re: plan',
+    date: '2026-08-27T10:00:00Z',
+    body: 'a'.repeat(3980) + marker + quoted
+  });
+  const oldCut = formatEmailForAgent(msgOld, '', config);
+  assert(!oldCut.includes('prior thread content'),
+         'ordering: quoted chain stripped when the marker straddles 4000');
+  assert(!/On Wed, Aug 26/.test(oldCut),
+         'ordering: and no marker fragment survives at 4000');
+
+  // Straddling the NEW 50000-char cap. The marker must sit across the point a
+  // raw cut would land, or the cut falls harmlessly inside the quote below it
+  // and the wrong order looks correct.
+  const msgNew = createMockMessage({
+    from: 'neil@example.com',
+    subject: 'Re: plan',
+    date: '2026-08-27T10:00:00Z',
+    body: 'b'.repeat(49980) + marker + quoted
+  });
+  const split = splitOversizeMessage(formatEmailForAgent(msgNew, '', config), []);
+  assert(!split.content.includes('prior thread content'),
+         'ordering: quoted chain stripped when the marker straddles 50000');
+  assert(!/On Wed, Aug 26/.test(split.content),
+         'ordering: and no marker fragment survives at 50000');
+  assert(!split.overflow || !/On Wed, Aug 26/.test(split.overflow.text),
+         'ordering: nor into the overflow file, which carries the whole message');
+})();
+
 // --- the push writes the overflow into the bundle, not into .files --------
 
 (() => {
