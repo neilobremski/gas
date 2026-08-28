@@ -477,7 +477,18 @@ function createMockBundleFolder() {
         })
       };
     },
-    createFile: (name, content, mimeType) => files.push({ name, content, mimeType })
+    // Drive's documented limits, so the overload choice is pinned by
+    // behaviour rather than by counting arguments: createFile(name, content,
+    // mimeType) throws above 10MB, createFile(name, content) allows 50MB.
+    // https://developers.google.com/apps-script/reference/drive/folder
+    createFile: (name, content, mimeType) => {
+      const size = typeof content === 'string' ? content.length : 0;
+      if (mimeType !== undefined && size > 10 * 1024 * 1024) {
+        throw new Error('Argument too large: content');
+      }
+      if (size > 50 * 1024 * 1024) throw new Error('Argument too large: content');
+      files.push({ name, content, mimeType });
+    }
   };
 }
 
@@ -1162,6 +1173,36 @@ function handleCalendar(command, args) {
   assertEqual(split.overflow.filename, 'message-2.md',
               'split: steps aside when the name is taken');
   assert(split.content.includes('message-2.md'), 'split: the note names the file it used');
+})();
+
+// --- a message too big for the 3-argument createFile still arrives ---------
+
+(() => {
+  const config = {
+    defaultAgent: 'agent',
+    capabilities: ['gmail'],
+    emailMap: { 'bob@example.com': 'bob-mail' },
+    routes: {},
+    commandAgents: []
+  };
+  const huge = 'h'.repeat(11 * 1024 * 1024);
+  const msg = createMockMessage({
+    from: 'bob@example.com',
+    subject: 'Everything',
+    date: '2026-08-27T10:00:00Z',
+    body: huge,
+    unread: true
+  });
+  const gmailApp = createMockGmailApp({ threads: [createMockThread('t1', [msg])] });
+  const outbox = createMockOutbox();
+  const count = pushNewEmails(gmailApp, config, outbox, createMockFilesFolder());
+  assertEqual(count, 1, 'huge body: the envelope is still written');
+  assert(!msg.isUnread(), 'huge body: and the mail is marked read, so it does not repeat');
+  const envelope = JSON.parse(outbox.getFiles()[0].content);
+  const stored = outbox._subfolders[envelope.id].getFilesByName('message.md');
+  assert(stored.hasNext(), 'huge body: the whole message reached the bundle');
+  assert(stored.next().getBlob().includes(huge),
+         'huge body: intact, not clipped to the 10MB overload limit');
 })();
 
 // --- sanitize runs BEFORE the size split, at both old and new boundaries --

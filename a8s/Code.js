@@ -270,7 +270,12 @@ const A8S = (() => {
         // never swept, and `copyFileToBundle` resolves a name to whichever
         // copy Drive hands back first.
         if (typeof f.text === 'string') {
-          bundle.createFile(filename, f.text, 'text/markdown');
+          // Two arguments, not three: Drive's createFile(name, content,
+          // mimeType) throws above 10MB while createFile(name, content)
+          // allows 50MB, and a Gmail body can exceed the smaller bound. The
+          // MIME type buys nothing downstream — the recipient reads the file
+          // by name off its own filesystem, not out of Drive.
+          bundle.createFile(filename, f.text);
         } else {
           copyFileToBundle(filesFolder, bundle, filename);
         }
@@ -860,21 +865,24 @@ const A8S = (() => {
     return `${header}\n\n${rest || body}`;
   }
 
-  // A long email is not a reason to lose most of it. Past the cap the body
+  // A long email is not a reason to lose most of it. Past the cap the message
   // carries what fits and the whole text rides along as a file, so nothing is
   // discarded and the agent is told where the rest went. The cap bounds one
   // turn's prompt, not the message: r4t caps again per rig, and only it knows
   // what the rig's model can hold.
-  const MAX_PUSH_BODY_CHARS = 50000;
+  //
+  // It measures the formatted message — header and subject remainder included,
+  // not the body alone — because that is what the agent reads.
+  const MAX_PUSH_MESSAGE_CHARS = 50000;
   const OVERFLOW_FILENAME = 'message.md';
 
   function splitOversizeMessage(content, taken) {
-    if (content.length <= MAX_PUSH_BODY_CHARS) return { content, overflow: null };
+    if (content.length <= MAX_PUSH_MESSAGE_CHARS) return { content, overflow: null };
     const used = taken || [];
     let filename = OVERFLOW_FILENAME;
     let n = 2;
     while (used.indexOf(filename) !== -1) filename = `message-${n++}.md`;
-    const kept = content.substring(0, MAX_PUSH_BODY_CHARS);
+    const kept = content.substring(0, MAX_PUSH_MESSAGE_CHARS);
     const dropped = content.length - kept.length;
     return {
       content: `${kept}\n\n[... truncated; ${dropped} more characters are in `
