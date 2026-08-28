@@ -391,6 +391,7 @@ function formatLogStatus(response) {
 // The production implementations, loaded above — no mirrors to drift.
 const { describeAge, formatMessageTag } = realA8S;
 const formatEmailForAgent = realA8S.formatEmailForAgent;
+const splitOversizeMessage = realA8S.splitOversizeMessage;
 const sanitizeEmailBody = realA8S.sanitizeEmailBody;
 const stripQuotedReply = realA8S.stripQuotedReply;
 
@@ -476,7 +477,18 @@ function createMockBundleFolder() {
         })
       };
     },
-    createFile: (name, content, mimeType) => files.push({ name, content, mimeType })
+    // Drive's documented limits, so the overload choice is pinned by
+    // behaviour rather than by counting arguments: createFile(name, content,
+    // mimeType) throws above 10MB, createFile(name, content) allows 50MB.
+    // https://developers.google.com/apps-script/reference/drive/folder
+    createFile: (name, content, mimeType) => {
+      const size = typeof content === 'string' ? content.length : 0;
+      if (mimeType !== undefined && size > 10 * 1024 * 1024) {
+        throw new Error('Argument too large: content');
+      }
+      if (size > 50 * 1024 * 1024) throw new Error('Argument too large: content');
+      files.push({ name, content, mimeType });
+    }
   };
 }
 
@@ -1117,6 +1129,9 @@ function handleCalendar(command, args) {
   assert(outbox.getFiles()[0].content.includes('Date: 2026-08-21T10:00:00.000Z'), 'pushNewEmails: envelope content carries date header');
 })();
 
+// --- an ordinary email is not truncated ---------------------------------
+// 4000 characters is about 600 words. A cap there cut normal mail in half.
+
 (() => {
   const longBody = 'x'.repeat(5000);
   const msg = createMockMessage({
@@ -1126,8 +1141,152 @@ function handleCalendar(command, args) {
     body: longBody
   });
   const result = formatEmailForAgent(msg, '', {});
-  assert(result.includes('[truncated]'), 'formatEmail: truncates body over 4000 chars');
-  assert(!result.includes('x'.repeat(5000)), 'formatEmail: body is actually shorter');
+  assert(result.includes(longBody), 'formatEmail: a 5000-char body arrives whole');
+  assert(!result.includes('truncated'), 'formatEmail: and is not marked truncated');
+})();
+
+// --- splitOversizeMessage(): nothing is discarded, only moved -------------
+
+(() => {
+  const body = 'y'.repeat(60000);
+  const split = splitOversizeMessage(body, []);
+  assert(split.overflow !== null, 'split: a 60k body overflows');
+  assertEqual(split.overflow.filename, 'message.md', 'split: names the file message.md');
+  assertEqual(split.overflow.text, body, 'split: the file holds the WHOLE message, not the tail');
+  assert(split.content.includes('truncated'), 'split: the body says it was truncated');
+  assert(split.content.includes('message.md'), 'split: and names the file to open');
+  assert(split.content.startsWith('y'.repeat(50000)), 'split: keeps the first 50k');
+  assert(split.content.indexOf('10000 more characters') !== -1,
+         'split: says how much moved');
+})();
+
+(() => {
+  const body = 'z'.repeat(50000);
+  const split = splitOversizeMessage(body, []);
+  assertEqual(split.overflow, null, 'split: exactly at the cap does not overflow');
+  assertEqual(split.content, body, 'split: and is passed through untouched');
+})();
+
+(() => {
+  // A real attachment already called message.md must not be shadowed.
+  const split = splitOversizeMessage('w'.repeat(60000), ['message.md']);
+  assertEqual(split.overflow.filename, 'message-2.md',
+              'split: steps aside when the name is taken');
+  assert(split.content.includes('message-2.md'), 'split: the note names the file it used');
+})();
+
+// --- a message too big for the 3-argument createFile still arrives ---------
+
+(() => {
+  const config = {
+    defaultAgent: 'agent',
+    capabilities: ['gmail'],
+    emailMap: { 'bob@example.com': 'bob-mail' },
+    routes: {},
+    commandAgents: []
+  };
+  const huge = 'h'.repeat(11 * 1024 * 1024);
+  const msg = createMockMessage({
+    from: 'bob@example.com',
+    subject: 'Everything',
+    date: '2026-08-27T10:00:00Z',
+    body: huge,
+    unread: true
+  });
+  const gmailApp = createMockGmailApp({ threads: [createMockThread('t1', [msg])] });
+  const outbox = createMockOutbox();
+  const count = pushNewEmails(gmailApp, config, outbox, createMockFilesFolder());
+  assertEqual(count, 1, 'huge body: the envelope is still written');
+  assert(!msg.isUnread(), 'huge body: and the mail is marked read, so it does not repeat');
+  const envelope = JSON.parse(outbox.getFiles()[0].content);
+  const stored = outbox._subfolders[envelope.id].getFilesByName('message.md');
+  assert(stored.hasNext(), 'huge body: the whole message reached the bundle');
+  assert(stored.next().getBlob().includes(huge),
+         'huge body: intact, not clipped to the 10MB overload limit');
+})();
+
+// --- sanitize runs BEFORE the size split, at both old and new boundaries --
+// The order is the fix, not an implementation detail. stripQuotedReply matches
+// "On <date> <person> wrote:" as one marker; a cut landing inside it leaves the
+// marker unmatched and the quoted chain leaks into the agent's message. These
+// put the marker exactly where each cap would land.
+
+(() => {
+  const config = { emailMap: { 'neil@example.com': 'neil-email' }, device: 'my-google' };
+  const marker = '\n\nOn Wed, Aug 26, 2026, at 6:24 PM, agent@example.com\nwrote:\n\n';
+  const quoted = '> prior thread content the agent must never see';
+
+  // Straddling the OLD 4000-char cap.
+  const msgOld = createMockMessage({
+    from: 'neil@example.com',
+    subject: 'Re: plan',
+    date: '2026-08-27T10:00:00Z',
+    body: 'a'.repeat(3980) + marker + quoted
+  });
+  const oldCut = formatEmailForAgent(msgOld, '', config);
+  assert(!oldCut.includes('prior thread content'),
+         'ordering: quoted chain stripped when the marker straddles 4000');
+  assert(!/On Wed, Aug 26/.test(oldCut),
+         'ordering: and no marker fragment survives at 4000');
+
+  // Straddling the NEW 50000-char cap. The marker must sit across the point a
+  // raw cut would land, or the cut falls harmlessly inside the quote below it
+  // and the wrong order looks correct.
+  const msgNew = createMockMessage({
+    from: 'neil@example.com',
+    subject: 'Re: plan',
+    date: '2026-08-27T10:00:00Z',
+    body: 'b'.repeat(49980) + marker + quoted
+  });
+  const split = splitOversizeMessage(formatEmailForAgent(msgNew, '', config), []);
+  assert(!split.content.includes('prior thread content'),
+         'ordering: quoted chain stripped when the marker straddles 50000');
+  assert(!/On Wed, Aug 26/.test(split.content),
+         'ordering: and no marker fragment survives at 50000');
+  assert(!split.overflow || !/On Wed, Aug 26/.test(split.overflow.text),
+         'ordering: nor into the overflow file, which carries the whole message');
+})();
+
+// --- the push writes the overflow into the bundle, not into .files --------
+
+(() => {
+  const config = {
+    defaultAgent: 'agent',
+    capabilities: ['gmail'],
+    emailMap: { 'bob@example.com': 'bob-mail' },
+    routes: {},
+    commandAgents: []
+  };
+  const msg = createMockMessage({
+    from: 'bob@example.com',
+    subject: 'War and Peace',
+    date: '2026-08-27T10:00:00Z',
+    body: 'q'.repeat(70000),
+    unread: true
+  });
+  const gmailApp = createMockGmailApp({ threads: [createMockThread('t1', [msg])] });
+  const outbox = createMockOutbox();
+  const filesFolder = createMockFilesFolder();
+  const count = pushNewEmails(gmailApp, config, outbox, filesFolder);
+  assertEqual(count, 1, 'push oversize: one envelope written');
+  const envelope = JSON.parse(outbox.getFiles()[0].content);
+  assertEqual(envelope.files.length, 1, 'push oversize: envelope lists one file');
+  assertEqual(envelope.files[0].filename, 'message.md', 'push oversize: named message.md');
+  assert(!('text' in envelope.files[0]),
+         'push oversize: the inline text does not leak into the envelope JSON');
+  const bundle = outbox._subfolders[envelope.id];
+  assert(bundle, 'push oversize: a bundle folder was created');
+  const stored = bundle.getFilesByName('message.md');
+  assert(stored.hasNext(), 'push oversize: the whole message is in the bundle');
+  const storedText = stored.next().getBlob();
+  assert(storedText.includes('q'.repeat(70000)),
+         'push oversize: the file holds the whole body, not the tail');
+  assert(storedText.startsWith('Date: '),
+         'push oversize: and the message as the agent would read it, header and all');
+  assert(!filesFolder.getFilesByName('message.md').hasNext(),
+         'push oversize: nothing was staged in the shared .files folder');
+  assert(envelope.content.includes('message.md'),
+         'push oversize: the body points at the file');
 })();
 
 // --- sanitizeEmailBody() / stripQuotedReply(): opaque push, no transport leakage ---
